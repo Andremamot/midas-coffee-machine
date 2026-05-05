@@ -138,9 +138,14 @@ class FusionGUI(Gtk.Window):
         # Tombol Start Calibration — hanya aktif di setup mode sebelum kalibrasi
         self.btn_start_calib = Gtk.Button(label="▶  Start Calibration")
         self.btn_start_calib.connect("clicked", self.on_start_calibration)
-        # Beri warna berbeda agar mencolok
         self.btn_start_calib.get_style_context().add_class("suggested-action")
         vb_a.pack_start(self.btn_start_calib, False, False, 0)
+
+        # Tombol Next Step (Pengganti Spasi)
+        self.btn_next_step = Gtk.Button(label="⏭  Next Step (Space)")
+        self.btn_next_step.connect("clicked", lambda w: self.queue_key(ord(' ')))
+        self.btn_next_step.get_style_context().add_class("suggested-action")
+        vb_a.pack_start(self.btn_next_step, False, False, 0)
         
         self.lbl_setup_hint = Gtk.Label(label="")
         self.lbl_setup_hint.set_line_wrap(True)
@@ -163,8 +168,9 @@ class FusionGUI(Gtk.Window):
         vb_a.pack_start(btn_cap, False, False, 0)
         vb_a.pack_start(btn_quit, False, False, 0)
         
-        # Sembunyikan tombol Start Calibration secara default (hanya muncul saat setup mode)
+        # Sembunyikan tombol Start Calibration & Next Step secara default
         self.btn_start_calib.hide()
+        self.btn_next_step.hide()
         self.lbl_setup_hint.hide()
         
         f_act.add(vb_a)
@@ -291,8 +297,9 @@ class FusionGUI(Gtk.Window):
         """Dipanggil saat user menekan tombol Start Calibration."""
         self.calibration_ready_event.set()
         GLib.idle_add(lambda: (self.btn_start_calib.set_sensitive(False),
-                               self.btn_start_calib.set_label("⏳  Calibrating..."),
-                               self.lbl_setup_hint.set_text("Calibration in progress...")) or False)
+                               self.btn_start_calib.hide(),
+                               self.btn_next_step.show(),
+                               self.lbl_setup_hint.set_text("Calibration in progress...\nClick 'Next Step' when prompted.")) or False)
 
     def enter_setup_mode(self, calib_name="Calibration"):
         """Dipanggil dari worker thread untuk menampilkan tombol Start Calibration."""

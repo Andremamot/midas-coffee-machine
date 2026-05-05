@@ -216,15 +216,19 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
             f = moil_undistorter.undistort(f)
             if anypoint_ctrl is not None and not headless:
                 anypoint_ctrl.draw_overlay(f)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('r') or key == ord('R'):
-                    anypoint_ctrl.reset()
-                    print(f"[MOIL] Reset anypoint → pitch={moil_undistorter.pitch}, yaw={moil_undistorter.yaw}, zoom={moil_undistorter.zoom}")
-                elif key == ord('s') or key == ord('S'):
-                    print(f"[MOIL] Current params: --moil-pitch {moil_undistorter.pitch:.1f} "
-                          f"--moil-yaw {moil_undistorter.yaw:.1f} "
-                          f"--moil-roll {moil_undistorter.roll:.1f} "
-                          f"--moil-zoom {moil_undistorter.zoom:.2f}")
+                
+                # Hanya panggil cv2.waitKey jika TIDAK pakai GUI GTK
+                # Memanggil cv2.waitKey di background thread saat GTK aktif akan menyebabkan SIGABRT!
+                if gui is None:
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('r') or key == ord('R'):
+                        anypoint_ctrl.reset()
+                        print(f"[MOIL] Reset anypoint → pitch={moil_undistorter.pitch}, yaw={moil_undistorter.yaw}, zoom={moil_undistorter.zoom}")
+                    elif key == ord('s') or key == ord('S'):
+                        print(f"[MOIL] Current params: --moil-pitch {moil_undistorter.pitch:.1f} "
+                              f"--moil-yaw {moil_undistorter.yaw:.1f} "
+                              f"--moil-roll {moil_undistorter.roll:.1f} "
+                              f"--moil-zoom {moil_undistorter.zoom:.2f}")
 
                 # SANGAT PENTING: Update camera matrix ArUco secara dinamis setiap frame!
                 # Jika user melakukan zoom in/out, focal length ekuivalen berubah.
