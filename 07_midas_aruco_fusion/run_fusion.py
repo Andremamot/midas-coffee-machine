@@ -205,10 +205,11 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
             f = cv2.resize(f, (cap_width, cap_height), interpolation=cv2.INTER_LINEAR)
 
         # ── Software lighting normalization ────────────────────────────────
-        # Hanya aktif di mode HEADLESS (tanpa GUI).
-        # Saat GUI aktif, user mengontrol hardware exposure langsung,
-        # normalisasi software TIDAK dijalankan sama sekali.
-        if args.manual_exposure > 0 and gui is None:
+        normalize_active = True
+        if gui is not None:
+            normalize_active = gui.is_normalize_enabled()
+
+        if args.manual_exposure > 0 and normalize_active:
             f, led_on = normalize_lighting(f)
             _led_state["detected"] = led_on
 

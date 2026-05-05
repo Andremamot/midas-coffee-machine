@@ -147,6 +147,11 @@ class FusionGUI(Gtk.Window):
         self.btn_next_step.get_style_context().add_class("suggested-action")
         vb_a.pack_start(self.btn_next_step, False, False, 0)
         
+        # Toggle Normalize Lighting
+        self.chk_normalize = Gtk.CheckButton(label="Enable Normalize Lighting")
+        self.chk_normalize.set_active(False)  # default mati
+        vb_a.pack_start(self.chk_normalize, False, False, 5)
+        
         self.lbl_setup_hint = Gtk.Label(label="")
         self.lbl_setup_hint.set_line_wrap(True)
         vb_a.pack_start(self.lbl_setup_hint, False, False, 0)
@@ -308,6 +313,10 @@ class FusionGUI(Gtk.Window):
                                self.lbl_setup_hint.show(),
                                self.lbl_setup_hint.set_text(hint),
                                self.lbl_status_calib.set_text(f"Setup: {calib_name}")) or False)
+
+    def is_normalize_enabled(self):
+        """Membaca status toggle normalize lighting"""
+        return self.chk_normalize.get_active()
 
     def on_key_press(self, widget, event):
         # Convert GDK keyval to ascii
