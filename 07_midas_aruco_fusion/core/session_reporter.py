@@ -3,6 +3,8 @@ import json
 import shutil
 from datetime import datetime
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 REPORT_DIR = "results/report"
@@ -84,14 +86,14 @@ def _generate_session_report(calib_data, marker_size_cm, focal_len, total_frames
         f.write("| :--- | :--- |\n")
         f.write(f"| **Physical Marker Size** | {marker_size_cm} cm |\n")
         
-        ctype = calib_data.get("type", 1)
-        if ctype == 2: calib_str = f"2-Point Linear (m={calib_data.get('m',0):.5f}, c={calib_data.get('c',0):.5f})"
+        ctype = (calib_data or {}).get("type", 1)
+        if ctype == 2: calib_str = f"2-Point Linear (m={(calib_data or {}).get('m',0):.5f}, c={(calib_data or {}).get('c',0):.5f})"
         elif ctype == 3: calib_str = "Z-Grid Polynomial"
         elif ctype == 4: calib_str = "BBox Area Scaling"
         elif ctype == 5: calib_str = "5-Geometric Z-Grid"
         elif ctype == 6: calib_str = "Bilateral Z-Grid"
         elif ctype == 7: calib_str = "Analytic Projection"
-        else: calib_str = f"1-Point K-Factor (K={calib_data.get('K',0):.5f})"
+        else: calib_str = f"1-Point K-Factor (K={(calib_data or {}).get('K',0):.5f})"
             
         f.write(f"| **Calibration Model** | {calib_str} |\n")
         f.write(f"| **Camera Focal Length** | {focal_len:.1f} px |\n\n")

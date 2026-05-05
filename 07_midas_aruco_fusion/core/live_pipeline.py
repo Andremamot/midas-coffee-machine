@@ -6,7 +6,16 @@ import core.session_reporter as sr
 import os
 from datetime import datetime
 
-def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, marker_size, active_poly_Kgeom, active_cup_str, args, SCREENSHOT_DIR, VIDEO_DIR):
+try:
+    import gi
+    gi.require_version('Gtk', '3.0')
+    from gi.repository import GLib as _GLib
+    _HAS_GTK = True
+except Exception:
+    _GLib = None
+    _HAS_GTK = False
+
+def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, marker_size, active_poly_Kgeom, active_cup_str, args, SCREENSHOT_DIR, VIDEO_DIR, gui=None):
     MIDAS_FPS_LIMIT = 5.0
     midas_interval  = 1.0 / MIDAS_FPS_LIMIT
     last_midas_t    = 0.0
@@ -72,12 +81,12 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
                     m_tray = midas.get_tray_depth(depth_map, aruco_roi)
 
                     if m_tray > 0:
-                        ctype = calib_data.get("type", 1)
+                        ctype = (calib_data or {}).get("type", 1)
                         for i in range(2):
                             if i < len(cup_bboxes):
                                 bbox = cup_bboxes[i]
                                 m_rim = midas.get_rim_depth(depth_map, bbox)
-                                if m_rim > 0:
+                                if m_rim > 0 and calib_data is not None:
                                     if ctype == 2:
                                         height_raw = hm.calc_height_2point(m_rim, m_tray, z_tray_live, calib_data.get("m", 0.1), calib_data.get("c", 0.0))
                                     elif ctype == 3:
@@ -206,9 +215,23 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
             if getattr(calib_data, "get", lambda x: 0)("type") == 5 or (isinstance(calib_data, dict) and calib_data.get("type") == 5):
                 cv2.putText(disp, f"TARGET MENU: {active_cup_str} cm", (int(40*S), int(145*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.65 * S, (0, 255, 255), 3)
 
-            if not headless:
+            if gui and not headless:
+                aruco_ok = 'OK' if z_tray_live else 'X'
+                yolo_ok = 'OK' if cup_bboxes else 'X'
+                led_state_obj = getattr(args, "_led_state", None) or {}
+                led_st = "ON" if led_state_obj.get("detected", False) else "OFF"
+                status_text = f"ArUco: {aruco_ok} | YOLO: {yolo_ok} | LED: {led_st}"
+                if _HAS_GTK:
+                    _GLib.idle_add(lambda t=status_text, g=gui: (g._alive and g.lbl_status_ai.set_text(t)) or False)
+                gui.update_image(disp)
+                key = gui.get_key()
+            elif not headless:
                 cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp)
                 key = cv2.waitKey(1) & 0xFF
+            else:
+                key = -1
+
+            if not headless:
                 if key in (27, ord('q')):
                     break
                 elif key == ord('s'):
@@ -245,7 +268,7 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
     finally:
             if video_writer: video_writer.release()
             cap.release()
-            if not headless: cv2.destroyAllWindows()
+            if not headless and not gui: cv2.destroyAllWindows()
 
             print("\n[DONE] Pipeline closed. Generating Final Report...")
             sr._generate_session_report(
