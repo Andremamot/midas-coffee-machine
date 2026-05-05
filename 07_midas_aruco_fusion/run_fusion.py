@@ -24,6 +24,7 @@ import core.height_math as hm
 import core.session_reporter as sr
 from core.moil_undistorter import MoilUndistorter
 from core.anypoint_controller import AnypointController
+from core.image_preprocess import normalize_lighting
 
 import cv2
 import numpy as np
@@ -175,15 +176,25 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
 
     WIN_NAME = "ArUco + MiDaS | Cup Height Estimator"
 
+    # Shared state untuk status LED — dibaca oleh live_pipeline untuk UI
+    _led_state = {"detected": False}
+
     def get_frame():
         r, f = cap.read()
         if not r:
             return False, None
-            
+
         # Force resize if camera hardware ignores our requested resolution
         if f.shape[1] != cap_width or f.shape[0] != cap_height:
             f = cv2.resize(f, (cap_width, cap_height), interpolation=cv2.INTER_LINEAR)
-            
+
+        # ── Software lighting normalization saat manual exposure aktif ────────
+        # Menggantikan fungsi auto-exposure hardware yang dimatikan.
+        # Status LED supplement dideteksi otomatis dari statistik frame.
+        if args.manual_exposure > 0:
+            f, led_on = normalize_lighting(f)
+            _led_state["detected"] = led_on
+
         if moil_undistorter is not None and not no_anypoint:
             f = moil_undistorter.undistort(f)
             if anypoint_ctrl is not None and not headless:
@@ -197,14 +208,13 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
                           f"--moil-yaw {moil_undistorter.yaw:.1f} "
                           f"--moil-roll {moil_undistorter.roll:.1f} "
                           f"--moil-zoom {moil_undistorter.zoom:.2f}")
-                
+
                 # SANGAT PENTING: Update camera matrix ArUco secara dinamis setiap frame!
                 # Jika user melakukan zoom in/out, focal length ekuivalen berubah.
                 # Ini mencegah jarak mendadak salah saat user melakukan scroll.
                 aruco.camera_matrix = moil_undistorter.build_aruco_camera_matrix(f.shape[1], f.shape[0])
-                
-        return True, f
 
+        return True, f
 
 
     # ── Setup OpenCV window + mouse callback ─────────────────────────────────
@@ -259,6 +269,9 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
         else:
             active_poly_Kgeom = calib_data.get("poly_Kgeom", [1.0])
             
+    # Pasang _led_state ke args agar live_pipeline bisa membaca status LED via UI
+    args._led_state = _led_state if args.manual_exposure > 0 else None
+
     # Delegate to live pipeline
     import core.live_pipeline as live_pipe
     live_pipe.run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, marker_size, active_poly_Kgeom, active_cup_str, args, SCREENSHOT_DIR, VIDEO_DIR)
