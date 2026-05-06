@@ -2,6 +2,8 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
 import cv2
+# KRITIS: Matikan OpenCL agar tidak crash (SIGABRT) saat multi-thread
+cv2.ocl.setUseOpenCL(False)
 import yaml
 import numpy as np
 import os
@@ -20,6 +22,7 @@ if fusion_dir not in sys.path:
 
 from midas_volumecup.depth import MidasDepthEstimator
 from midas_volumecup.detector import YoloDetector
+from core.image_preprocess import normalize_lighting
 
 class TestDataCollectionWindow(Gtk.Window):
     def __init__(self):
@@ -41,6 +44,9 @@ class TestDataCollectionWindow(Gtk.Window):
         self.lock = threading.Lock()
         
         self.moil_undistorter = None
+
+        # Manual exposure state (0 = auto mode)
+        self.manual_exposure = 0
         
         # Ensure data directories exist in the dataset folder
         self.points_file = os.path.join(os.path.dirname(__file__), 'test_points.json')
@@ -141,6 +147,29 @@ class TestDataCollectionWindow(Gtk.Window):
         vb_m.pack_start(hb_moil_z, 0, 0, 0)
         f_moil.add(vb_m); vbox_ctrl.pack_start(f_moil, 0,0,10)
 
+        # Exposure Frame
+        f_exp = Gtk.Frame(label="Camera Exposure")
+        vb_e = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+
+        hb_exp = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        self.entry_exposure = Gtk.Entry(text="0")
+        btn_apply_exp = Gtk.Button(label="Apply")
+        btn_apply_exp.connect("clicked", self.on_apply_exposure)
+        hb_exp.pack_start(Gtk.Label(label="Manual Exp (0=Auto):"), 0, 0, 0)
+        hb_exp.pack_start(self.entry_exposure, True, True, 0)
+        hb_exp.pack_start(btn_apply_exp, False, False, 0)
+        vb_e.pack_start(hb_exp, 0, 0, 0)
+
+        self.chk_normalize = Gtk.CheckButton(label="Normalize Lighting")
+        self.chk_normalize.set_active(True)
+        vb_e.pack_start(self.chk_normalize, 0, 0, 0)
+
+        self.lbl_exposure_info = Gtk.Label(label="Exposure: Auto")
+        self.lbl_exposure_info.set_line_wrap(True)
+        vb_e.pack_start(self.lbl_exposure_info, 0, 0, 0)
+
+        f_exp.add(vb_e); vbox_ctrl.pack_start(f_exp, 0, 0, 10)
+
         self.lbl_status = Gtk.Label(label="Status..."); vbox_ctrl.pack_start(self.lbl_status, 0,0,0)
         hbox.pack_start(vbox_ctrl, 0,0,0)
         self.image = Gtk.Image(); hbox.pack_start(self.image, 1,1,0)
@@ -196,20 +225,63 @@ class TestDataCollectionWindow(Gtk.Window):
                         current_idx = int(cam_id) if cam_id.isdigit() else cam_id
                     
                     self.cap = cv2.VideoCapture(current_idx)
-                    
+
+                    # Set resolusi native
                     self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2592)
                     self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1944)
-                    self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
                     self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-                    
+
+                    if self.manual_exposure > 0:
+                        print(f"[CAM] Manual Exposure: {self.manual_exposure}")
+                        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # Manual Mode V4L2
+                        self.cap.set(cv2.CAP_PROP_EXPOSURE, self.manual_exposure)
+                    else:
+                        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # Auto (aperture priority)
+
                     if not self.cap or not self.cap.isOpened():
                         GLib.idle_add(self.lbl_status.set_text, f"FAILED to open Camera {current_idx}. Retrying...")
                         if self.cap: self.cap.release()
                         self.cap = None
                         time.sleep(2.0)
                         continue
-                    else:
-                        GLib.idle_add(self.lbl_status.set_text, f"Camera {current_idx} Active")
+
+                    # ── Warmup: tunggu sensor auto-expose siap ──────────────
+                    GLib.idle_add(self.lbl_status.set_text, f"Camera {current_idx}: Warming up...")
+                    time.sleep(1.5)
+                    warmed = False
+                    for _ in range(60):
+                        ret_w, frm_w = self.cap.read()
+                        if ret_w and frm_w is not None:
+                            brightness = cv2.cvtColor(frm_w, cv2.COLOR_BGR2GRAY).mean()
+                            if brightness > 15:
+                                warmed = True
+                                break
+                        time.sleep(0.1)
+
+                    # Baca exposure aktual setelah warmup
+                    actual_exp = int(self.cap.get(cv2.CAP_PROP_EXPOSURE))
+                    if self.manual_exposure <= 0:
+                        # Sanity check — jika terlalu rendah, reset auto
+                        if actual_exp < 100:
+                            print(f"[CAM] Exposure tidak valid ({actual_exp}), reset auto...")
+                            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                            time.sleep(2.0)
+                            for _ in range(10):
+                                self.cap.grab()
+                            actual_exp = int(self.cap.get(cv2.CAP_PROP_EXPOSURE))
+
+                        # Kunci ke manual mode dengan nilai yang terdeteksi
+                        self.manual_exposure = actual_exp
+                        GLib.idle_add(self.entry_exposure.set_text, str(actual_exp))
+
+                    self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)   # Kunci manual
+                    self.cap.set(cv2.CAP_PROP_EXPOSURE, self.manual_exposure)
+                    for _ in range(4):
+                        self.cap.grab()
+
+                    GLib.idle_add(self.lbl_exposure_info.set_text,
+                                  f"Exposure: {self.manual_exposure} raw ({'auto-det' if not warmed else 'warmed'})")
+                    GLib.idle_add(self.lbl_status.set_text, f"Camera {current_idx} Active")
 
                 # 3. Read Frame
                 ret, frame = self.cap.read()
@@ -220,6 +292,10 @@ class TestDataCollectionWindow(Gtk.Window):
                 # 4. Processing
                 if self.moil_undistorter is not None:
                     frame = self.moil_undistorter.undistort(frame)
+
+                # ── Normalize lighting (seperti run_fusion.py) ────────────────
+                if self.manual_exposure > 0 and self.chk_normalize.get_active():
+                    frame, _led = normalize_lighting(frame)
 
                 self.latest_frame = frame.copy()
                 self.latest_depth = self.depth_estimator.process(frame)
@@ -298,6 +374,28 @@ class TestDataCollectionWindow(Gtk.Window):
         with self.lock:
             self.requested_cam_id = idx
         self.lbl_status.set_text(f"Requesting camera switch to {idx}...")
+
+    def on_apply_exposure(self, widget):
+        """Terapkan manual exposure ke kamera yang sedang berjalan."""
+        try:
+            exp_val = int(self.entry_exposure.get_text())
+        except ValueError:
+            self.lbl_status.set_text("Exposure: masukkan angka bulat.")
+            return
+
+        self.manual_exposure = exp_val
+
+        if self.cap and self.cap.isOpened():
+            if exp_val > 0:
+                self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # Manual mode V4L2
+                self.cap.set(cv2.CAP_PROP_EXPOSURE, exp_val)
+                info = f"Exposure: {exp_val} raw ({exp_val/1000:.2f}s)"
+            else:
+                self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # Auto
+                info = "Exposure: Auto"
+
+            self.lbl_exposure_info.set_text(info)
+            self.lbl_status.set_text(f"Applied: {info}")
 
     def on_apply_moil(self, widget):
         cam_name = self.entry_moil_cam.get_text()
