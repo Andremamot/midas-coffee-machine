@@ -27,6 +27,12 @@ from core.anypoint_controller import AnypointController
 from core.image_preprocess import normalize_lighting
 
 import cv2
+# KRITIS: Matikan OpenCL sepenuhnya.
+# OpenCL context TIDAK thread-safe saat diakses dari multiple pipeline
+# (Moildev remap + YOLO + MiDaS + GTK rendering) → menyebabkan
+# "terminate called without an active exception" (SIGABRT) dan SIGSEGV.
+# CPU-only mode lebih lambat tapi 100% stabil.
+cv2.ocl.setUseOpenCL(False)
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -133,9 +139,35 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
 
     # Baca exposure aktual dari kamera setelah warmup
     actual_exposure_raw = int(cap.get(cv2.CAP_PROP_EXPOSURE))
+
+    # Sanity check: jika nilai terlalu rendah (< 100), kamera mungkin mewarisi state buruk
+    # dari sesi sebelumnya (mis. test diagnostik yang meninggalkan exposure=1).
+    # Reset ke auto sebentar lalu baca ulang.
+    if actual_exposure_raw < 100:
+        print(f"[CAM] Exposure terdeteksi tidak valid ({actual_exposure_raw}), reset ke auto...")
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # auto mode
+        time.sleep(2.0)
+        for _ in range(10):
+            cap.grab()
+        actual_exposure_raw = int(cap.get(cv2.CAP_PROP_EXPOSURE))
+        print(f"[CAM] Setelah reset auto: exposure = {actual_exposure_raw}")
+
     if args.manual_exposure <= 0:
         args.manual_exposure = actual_exposure_raw
         print(f"[CAM] Exposure aktual terdeteksi: {actual_exposure_raw} (raw) = {actual_exposure_raw/1000:.1f} detik")
+
+
+    # ── KRITIS: Paksa kamera ke Manual Mode dengan nilai yang sama ──────────────
+    # Saat warmup, kamera dalam mode Auto-Exposure. Jika dibiarkan, gambar di startup
+    # akan terlihat berbeda dari setelah user pertama kali mengubah exposure (yang
+    # memaksa masuk ke manual mode). Dengan mengunci ke manual mode sekarang,
+    # kondisi startup konsisten dengan kondisi setelah penyesuaian exposure.
+    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)          # 1 = Manual Mode V4L2
+    cap.set(cv2.CAP_PROP_EXPOSURE, args.manual_exposure)
+    # Flush buffer agar frame dengan exposure baru langsung tampil
+    for _ in range(4):
+        cap.grab()
+    print(f"[CAM] Manual mode dikunci: exposure={args.manual_exposure} raw ({args.manual_exposure/1000:.1f})")
 
 
     # ── Inisiasi Moildev undistorter (hanya jika --fisheye aktif) ─────────────
@@ -186,19 +218,58 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
     _led_state = {"detected": False}
     _last_exposure_change_t = [0.0]  # track waktu terakhir exposure diubah
 
-    def get_frame():
-        if gui_desired_exposure[0] != args.manual_exposure:
-            val = gui_desired_exposure[0]
-            if cap and cap.isOpened():
-                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # Force manual mode sebelum set exposure
-                cap.set(cv2.CAP_PROP_EXPOSURE, val)
-                args.manual_exposure = val
-                _last_exposure_change_t[0] = time.time()
-                print(f"[CAM] Hardware exposure applied: {val}")
+    _fps_prev_t = [time.time()]  # FPS tracker untuk overlay
 
-        ret, f = cap.read()
-        if not ret:
+    # GUI shared state — harus didefinisikan SEBELUM _camera_reader
+    gui_desired_exposure = [args.manual_exposure]
+    gui_desired_gain     = [128]
+    gui_desired_bri      = [0]
+
+    # ── Threaded Camera Reader ──────────────────────────────────────────────
+    # cap.read() memblokir ~300-500ms per frame di resolusi 2592x1944.
+    # Threaded reader membaca terus di background → get_frame() langsung ambil
+    # frame terbaru tanpa menunggu kamera.
+    import threading as _thr
+    _cam_frame = [None]       # frame terbaru dari kamera
+    _cam_ret   = [False]
+    _cam_lock  = _thr.Lock()
+    _cam_alive = [True]
+
+    def _camera_reader():
+        """Background thread: baca frame terus-menerus dari kamera."""
+        while _cam_alive[0]:
+            # Terapkan perubahan hardware sekaligus (atomik)
+            if (gui_desired_exposure[0] != args.manual_exposure or
+                gui_desired_gain[0] != getattr(args, '_current_gain', 128) or
+                gui_desired_bri[0] != getattr(args, '_current_bri', 0)):
+                if cap and cap.isOpened():
+                    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+                    cap.set(cv2.CAP_PROP_EXPOSURE, gui_desired_exposure[0])
+                    cap.set(cv2.CAP_PROP_GAIN, gui_desired_gain[0])
+                    cap.set(cv2.CAP_PROP_BRIGHTNESS, gui_desired_bri[0])
+                    args.manual_exposure = gui_desired_exposure[0]
+                    args._current_gain = gui_desired_gain[0]
+                    args._current_bri = gui_desired_bri[0]
+                    _last_exposure_change_t[0] = time.time()
+                    print(f"[CAM] HW applied: exp={args.manual_exposure} gain={args._current_gain} bri={args._current_bri}")
+
+            ret, frame = cap.read()
+            with _cam_lock:
+                _cam_ret[0] = ret
+                _cam_frame[0] = frame
+
+    # NOTE: Thread distart SETELAH GUI init — lihat bawah
+
+    def get_frame():
+        # Ambil frame terbaru dari threaded reader (non-blocking)
+        with _cam_lock:
+            ret = _cam_ret[0]
+            f = _cam_frame[0]
+            _cam_frame[0] = None  # tandai sudah diambil
+
+        if not ret or f is None:
             return False, None
+
 
         # Force resize if camera hardware ignores our requested resolution
         if f.shape[1] != cap_width or f.shape[0] != cap_height:
@@ -236,17 +307,28 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
                 # Ini mencegah jarak mendadak salah saat user melakukan scroll.
                 aruco.camera_matrix = moil_undistorter.build_aruco_camera_matrix(f.shape[1], f.shape[0])
 
+        # ── FPS overlay (pojok kiri bawah, skala proporsional ke resolusi) ─
+        now_t = time.time()
+        dt = now_t - _fps_prev_t[0]
+        _fps_prev_t[0] = now_t
+        fps_val = 1.0 / dt if dt > 0 else 0
+        h_f, w_f = f.shape[:2]
+        _S = max(1.0, w_f / 1280.0)  # skala teks proporsional ke lebar frame
+        cv2.putText(f, f"FPS: {fps_val:.1f}", (int(10*_S), h_f - int(20*_S)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7 * _S, (0, 255, 0), max(2, int(2*_S)))
+
         return True, f
 
 
     import threading
     from core.gui_fusion import FusionGUI
     gui = None
-    gui_desired_exposure = [args.manual_exposure]
-    
-    def set_exposure_cb(val):
-        gui_desired_exposure[0] = val
-        print(f"[GUI] Requested exposure change to: {val}")
+
+    def set_smart_exposure_cb(exp_val, gain_val, bri_val):
+        gui_desired_exposure[0] = exp_val
+        gui_desired_gain[0] = gain_val
+        gui_desired_bri[0] = bri_val
+        print(f"[GUI] Smart Exp applied -> Shutter: {exp_val}, ISO: {gain_val}, EV: {bri_val}")
 
     if not headless:
         import gi
@@ -254,12 +336,22 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
         from gi.repository import Gtk
         gui = FusionGUI(moil_undistorter=moil_undistorter, headless=False,
                         initial_exposure=args.manual_exposure,
-                        exposure_callback=set_exposure_cb)
+                        exposure_callback=set_smart_exposure_cb)
+        gui_desired_exposure[0] = args.manual_exposure
+        # Sinkronkan gain/brightness aktual dari hardware
+        actual_gain = int(cap.get(cv2.CAP_PROP_GAIN))
+        actual_bri = int(cap.get(cv2.CAP_PROP_BRIGHTNESS))
+        gui_desired_gain[0] = actual_gain
+        gui_desired_bri[0] = actual_bri
         print("[GUI] GTK3 Interface Active")
     else:
         gui = FusionGUI(moil_undistorter=moil_undistorter, headless=True,
                         initial_exposure=args.manual_exposure,
-                        exposure_callback=set_exposure_cb)
+                        exposure_callback=set_smart_exposure_cb)
+
+    # Start camera reader thread SETELAH gui_desired_* sudah siap
+    _cam_thread = _thr.Thread(target=_camera_reader, daemon=True)
+    _cam_thread.start()
         
     # Delegate to calibration routines in a background thread
     def worker_thread():

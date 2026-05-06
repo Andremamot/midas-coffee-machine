@@ -151,15 +151,14 @@ class MoilUndistorter:
 
         if use_opencl:
             try:
-                if cv2.ocl.haveOpenCL():
-                    cv2.ocl.setUseOpenCL(True)
+                if cv2.ocl.haveOpenCL() and cv2.ocl.useOpenCL():
                     # Upload map ke device memory
                     self._map_x = cv2.UMat(self._map_x_cpu)
                     self._map_y = cv2.UMat(self._map_y_cpu)
                     self.opencl_active = True
                     print("[MOIL] OpenCL aktif — remap akan diakselerasi oleh GPU/iGPU.")
                 else:
-                    print("[MOIL] OpenCL tidak tersedia di sistem ini. Fallback ke CPU.")
+                    print("[MOIL] OpenCL dinonaktifkan atau tidak tersedia. Menggunakan CPU.")
             except Exception as _ocl_err:
                 warnings.warn(
                     f"[MOIL] Gagal mengaktifkan OpenCL: {_ocl_err}. Fallback ke CPU."
@@ -239,7 +238,10 @@ class MoilUndistorter:
         if frame is None:
             return frame
 
-        # Jika OpenCL aktif, upload frame ke UMat
+        # INTER_LINEAR dipilih karena INTER_CUBIC dan INTER_LANCZOS4 menyebabkan
+        # crash C++ (std::terminate / SIGSEGV) yang TIDAK BISA di-catch Python
+        # saat OpenCL menerima frame transisi pasca-perubahan exposure.
+        # Di resolusi 2592x1944 perbedaan visual LINEAR vs CUBIC tidak terlihat.
         if self.opencl_active:
             frame_in = cv2.UMat(frame)
         else:
@@ -249,12 +251,11 @@ class MoilUndistorter:
             frame_in,
             self._map_x,
             self._map_y,
-            interpolation=cv2.INTER_CUBIC, # Lebih tajam dari LINEAR
+            interpolation=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         )
 
-        # Download kembali ke numpy jika pakai UMat
         if self.opencl_active:
             remapped = remapped.get()
 

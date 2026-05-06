@@ -141,9 +141,10 @@ class TestGUIFusion:
         assert abs(mock_moil.zoom - 1.5) < 0.01
 
     def test_exposure_initial_value(self, gui):
-        # GUI dibuat dengan initial_exposure=70 (raw) → tampil sebagai 0.1 (70/1000 dibulatkan)
+        # GUI dibuat dengan initial_exposure=70 (raw).
+        # Karena Smart Exposure clamp di minimum 1.0, maka akan dibulatkan ke 1.0
         text = gui.entry_exposure.get_text()
-        assert float(text) == round(70 / 1000, 1), f"Nilai display harus {round(70/1000,1)}, dapat: {text}"
+        assert float(text) == 1.0, f"Nilai display harus clamp di 1.0, dapat: {text}"
 
     def test_exposure_callback_called(self, mock_moil):
         from core.gui_fusion import FusionGUI
@@ -151,18 +152,22 @@ class TestGUIFusion:
         gui = FusionGUI(
             moil_undistorter=mock_moil,
             headless=True,
-            initial_exposure=2000,  # raw 2000 → display 2.0
-            exposure_callback=lambda v: received.append(v)
+            initial_exposure=2000,
+            exposure_callback=lambda e, g, b: received.append((e, g, b))
         )
-        gui.entry_exposure.set_text("1.5")  # 1.5 display → 1500 raw
-        gui.on_apply_exposure(None)
-        assert received == [1500], f"Callback dipanggil dengan {received}, diharapkan [1500] (1.5 * 1000)"
+        gui.entry_exposure.set_text("5.5")  # Set ke tengah
+        gui.on_apply_smart_exposure(None)
+        assert len(received) == 1
+        e, g, b = received[0]
+        assert e == 5500
+        assert g == 128  # (5.5-1)/9 * 255 = 127.5 -> 128
+        assert b == 0    # (5.5-1)/9 * 128 - 64 = 0
 
     def test_exposure_adj_clamps_at_zero(self, gui):
-        gui.entry_exposure.set_text("0.5")
-        gui.on_adj_exposure(None, -100.0)  # coba kurangi sampai sangat negatif
+        gui.entry_exposure.set_text("2.0")
+        gui.on_adj_smart_exposure(None, -100.0)  # coba kurangi sampai sangat negatif
         val = float(gui.entry_exposure.get_text())
-        assert val >= 0.0, "Exposure tidak boleh negatif"
+        assert val >= 1.0, "Smart Exposure clamp minimal di 1.0"
 
     def test_quit_button_queues_esc(self, gui):
         # Tombol Quit harus memasukkan keycode 27 (ESC)

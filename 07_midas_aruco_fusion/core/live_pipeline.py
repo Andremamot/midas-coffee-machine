@@ -38,6 +38,9 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
     history_cup_h = {0: [], 1: []}
     history_frames = []
 
+    _prev_frame_t = time.time()
+    fps_val = 0.0
+
     try:
         while True:
             ret, frame = get_frame()
@@ -46,6 +49,9 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
                 continue
 
             now = time.time()
+            dt = now - _prev_frame_t
+            _prev_frame_t = now
+            fps_val = 1.0 / dt if dt > 0 else 0
             stats_total_frames += 1
             h_frame, w_frame = frame.shape[:2]
 
@@ -209,7 +215,7 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
                             (w_frame - int(200*S), h_frame - int(15*S)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, led_color, 3)
 
-            bar_txt = f"ArUco: {'OK' if z_tray_live else 'X'} | YOLO: {'OK' if cup_bboxes else 'X'} | [R] Record  [S] Screen  [Q] Quit"
+            bar_txt = f"FPS: {fps_val:.1f} | ArUco: {'OK' if z_tray_live else 'X'} | YOLO: {'OK' if cup_bboxes else 'X'} | [R] Record  [S] Screen  [Q] Quit"
             cv2.putText(disp, bar_txt, (int(20*S), h_frame - int(15*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (130, 200, 130), 3)
 
             if getattr(calib_data, "get", lambda x: 0)("type") == 5 or (isinstance(calib_data, dict) and calib_data.get("type") == 5):
@@ -245,8 +251,10 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
                         ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
                         vid_path = os.path.join(VIDEO_DIR, f"fusion_{ts}.mp4")
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                        fps_cap = cap.get(cv2.CAP_PROP_FPS) or 30.0
-                        video_writer = cv2.VideoWriter(vid_path, fourcc, fps_cap, (w_frame, h_frame))
+                        # Gunakan 10 fps minimum — cap.get(CAP_PROP_FPS) mengembalikan 1.0
+                        # di resolusi 2592x1944 yang akan menghasilkan video patah-patah
+                        rec_fps = max(10.0, cap.get(cv2.CAP_PROP_FPS))
+                        video_writer = cv2.VideoWriter(vid_path, fourcc, rec_fps, (w_frame, h_frame))
                         is_recording = True
                         print(f"🔴 [REC] Mulai merekam video: {vid_path}")
                     else:

@@ -5,19 +5,21 @@ import cv2
 import queue
 
 class FusionGUI(Gtk.Window):
-    def __init__(self, moil_undistorter=None, headless=False, initial_exposure=0, exposure_callback=None):
+    def __init__(self, moil_undistorter=None, headless=False, initial_exposure=0,
+                 exposure_callback=None, gain_callback=None, brightness_callback=None):
         super().__init__(title="ArUco + MiDaS | Fusion Interface")
         self.set_default_size(1280, 720)
         
         self.moil_undistorter = moil_undistorter
         self.headless = headless
-        self.exposure_callback = exposure_callback
+        self.smart_exposure_callback = exposure_callback
         self.initial_exposure = initial_exposure
-        self._alive = True  # flag agar idle callbacks berhenti setelah window ditutup
-        self._last_ui_frame_t = 0.0    # untuk throttle update_image max 20 FPS
-        self.calibration_ready_event = __import__('threading').Event()  # signal: user siap mulai kalibrasi
-        
-        # Thread-safe queue for keystrokes
+        self._alive = True
+        self._last_ui_frame_t = 0.0
+        self.calibration_ready_event = __import__('threading').Event()
+        # Cache boolean untuk normalize lighting — dibaca dari background thread
+        # WAJIB Python bool biasa, bukan akses GTK widget (thread-unsafe → SIGABRT)
+        self._normalize_enabled = False
         self.key_queue = queue.Queue()
         
         self.connect("destroy", self.on_destroy)
@@ -41,21 +43,23 @@ class FusionGUI(Gtk.Window):
         vb_s.pack_start(self.lbl_status_calib, False, False, 0)
         vb_s.pack_start(self.lbl_status_ai, False, False, 0)
         
-        # Exposure Control
+        # Smart Exposure Control
+        # Menggabungkan Exposure (waktu), Gain (ISO), dan Brightness (EV) ke dalam satu slider 1.0 - 10.0
         hb_exp = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
-        hb_exp.pack_start(Gtk.Label(label="Exposure:"), False, False, 0)
+        hb_exp.pack_start(Gtk.Label(label="Smart Exp:"), False, False, 0)
         
         btn_exp_mm = Gtk.Button(label="--")
-        btn_exp_mm.connect("clicked", self.on_adj_exposure, -1.0)
+        btn_exp_mm.connect("clicked", self.on_adj_smart_exposure, -2.0)
         btn_exp_min = Gtk.Button(label=" - ")
-        btn_exp_min.connect("clicked", self.on_adj_exposure, -0.1)
+        btn_exp_min.connect("clicked", self.on_adj_smart_exposure, -0.5)
         btn_exp_plus = Gtk.Button(label=" + ")
-        btn_exp_plus.connect("clicked", self.on_adj_exposure, +0.1)
+        btn_exp_plus.connect("clicked", self.on_adj_smart_exposure, +0.5)
         btn_exp_pp = Gtk.Button(label="++")
-        btn_exp_pp.connect("clicked", self.on_adj_exposure, +1.0)
-        # Tampilkan dalam satuan desimal: raw/1000
-        display_val = round(self.initial_exposure / 1000, 1)
+        btn_exp_pp.connect("clicked", self.on_adj_smart_exposure, +2.0)
+        
+        display_val = max(1.0, min(10.0, round(self.initial_exposure / 1000, 1)))
         self.entry_exposure = Gtk.Entry(text=str(display_val))
+        self.entry_exposure.set_tooltip_text("1.0 (Gelap) - 10.0 (Sangat Terang). Otomatis mengatur Shutter, ISO & EV.")
         self.entry_exposure.set_width_chars(6)
         
         hb_exp.pack_start(btn_exp_mm, False, False, 0)
@@ -65,7 +69,7 @@ class FusionGUI(Gtk.Window):
         hb_exp.pack_start(btn_exp_pp, False, False, 0)
         
         btn_apply_exp = Gtk.Button(label="Apply")
-        btn_apply_exp.connect("clicked", self.on_apply_exposure)
+        btn_apply_exp.connect("clicked", self.on_apply_smart_exposure)
         hb_exp.pack_start(btn_apply_exp, False, False, 0)
         
         vb_s.pack_start(hb_exp, False, False, 5)
@@ -150,6 +154,8 @@ class FusionGUI(Gtk.Window):
         # Toggle Normalize Lighting
         self.chk_normalize = Gtk.CheckButton(label="Enable Normalize Lighting")
         self.chk_normalize.set_active(False)  # default mati
+        # Update cache Python saat checkbox diubah (JANGAN baca widget dari background thread!)
+        self.chk_normalize.connect("toggled", self._on_normalize_toggled)
         vb_a.pack_start(self.chk_normalize, False, False, 5)
         
         self.lbl_setup_hint = Gtk.Label(label="")
@@ -213,7 +219,8 @@ class FusionGUI(Gtk.Window):
         if w > target_w:
             scale = target_w / float(w)
             new_h = int(h * scale)
-            frame_bgr = cv2.resize(frame_bgr, (target_w, new_h))
+            # Menggunakan INTER_AREA sangat penting untuk downscaling resolusi tinggi agar tidak ada aliasing/garis gergaji di layar
+            frame_bgr = cv2.resize(frame_bgr, (target_w, new_h), interpolation=cv2.INTER_AREA)
 
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         out_h, out_w = rgb.shape[:2]
@@ -222,12 +229,21 @@ class FusionGUI(Gtk.Window):
         GLib.idle_add(self._update_image_from_glib_bytes, glib_bytes, out_w, out_h)
 
     def _update_image_from_glib_bytes(self, glib_bytes, w, h):
-        """Dijalankan di GTK main thread — aman memanggil widget GTK."""
+        """Dijalankan di GTK main thread — aman memanggil widget GTK.
+        WAJIB pakai new_from_bytes (bukan new_from_data): new_from_data tidak menyalin
+        data sehingga saat Python GC membebaskan glib_bytes, GTK akan akses dangling pointer.
+        new_from_bytes menyalin data ke memory yang dikelola GLib — aman dari GC Python.
+        """
         if self.headless or not self._alive:
             return False
         try:
             pb = GdkPixbuf.Pixbuf.new_from_bytes(
-                glib_bytes, GdkPixbuf.Colorspace.RGB, False, 8, w, h, w * 3
+                glib_bytes,
+                GdkPixbuf.Colorspace.RGB,
+                False,   # has_alpha
+                8,       # bits_per_sample
+                w, h,
+                w * 3,   # rowstride
             )
             self.image.set_from_pixbuf(pb)
         except Exception:
@@ -258,24 +274,33 @@ class FusionGUI(Gtk.Window):
         except ValueError:
             pass
             
-    def on_adj_exposure(self, widget, delta):
-        """delta dalam satuan desimal (0.1 = 100 raw, 1.0 = 1000 raw)"""
+    def on_adj_smart_exposure(self, widget, delta):
         try:
             val = round(float(self.entry_exposure.get_text()) + delta, 1)
-            if val < 0.0:
-                val = 0.0
+            val = max(1.0, min(10.0, val))
             self.entry_exposure.set_text(str(val))
-            self.on_apply_exposure(None)
+            self.on_apply_smart_exposure(None)
         except ValueError:
             pass
 
-    def on_apply_exposure(self, widget):
-        """Konversi nilai desimal GUI ke raw integer untuk hardware camera."""
-        if self.exposure_callback:
+    def on_apply_smart_exposure(self, widget):
+        if self.smart_exposure_callback:
             try:
-                display_val = float(self.entry_exposure.get_text())
-                raw_val = int(round(display_val * 1000))
-                self.exposure_callback(raw_val)
+                val = float(self.entry_exposure.get_text())
+                val = max(1.0, min(10.0, val))
+                
+                # Pemetaan Smart Exposure (1.0 - 10.0):
+                # Exposure time (Raw): 1000 -> 10000
+                raw_exp = int(round(val * 1000))
+                
+                # Gain (0 - 255): Scale linearly from val 1.0 to 10.0
+                raw_gain = int(round((val - 1.0) / 9.0 * 255.0))
+                
+                # Brightness EV (-64 to +64): Scale linearly
+                raw_bri = int(round((val - 1.0) / 9.0 * 128.0 - 64.0))
+                
+                # Panggil satu callback dengan 3 nilai
+                self.smart_exposure_callback(raw_exp, raw_gain, raw_bri)
             except ValueError:
                 pass
 
@@ -314,9 +339,13 @@ class FusionGUI(Gtk.Window):
                                self.lbl_setup_hint.set_text(hint),
                                self.lbl_status_calib.set_text(f"Setup: {calib_name}")) or False)
 
+    def _on_normalize_toggled(self, widget):
+        """Dijalankan di GTK main thread — update cache Python yang aman dibaca dari thread lain."""
+        self._normalize_enabled = widget.get_active()
+
     def is_normalize_enabled(self):
-        """Membaca status toggle normalize lighting"""
-        return self.chk_normalize.get_active()
+        """Dibaca dari background thread — hanya kembalikan Python bool (BUKAN akses GTK widget)."""
+        return self._normalize_enabled
 
     def on_key_press(self, widget, event):
         # Convert GDK keyval to ascii
