@@ -5,7 +5,7 @@ import core.calibration_storage as cs
 import core.height_math as hm
 import sys
 
-def run_calib_1p_2p(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, calibrate_mode):
+def run_calib_1p_2p(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, calibrate_mode, gui=None):
     CALIB_WARMUP_SEC  = 5.0
     CALIB_SAMPLE_SEC  = 8.0
 
@@ -139,15 +139,22 @@ def run_calib_1p_2p(get_frame, cap, aruco, yolo, midas, headless, true_height, t
             cv2.putText(disp_c, "Then PRESS 'SPACE' to continue.", (int(45*S), int(110*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (100, 255, 100), 2)
 
         if not headless:
-            cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27:
-                cap.release()
-                cv2.destroyAllWindows()
-                sys.exit(0)
-            if phase == "swap_wait" and key == ord(' '):
-                calib_start = time.time()
-                phase = "warmup_2"
+            if gui:
+                gui.update_image(disp_c)
+                key = gui.get_key()
+            else:
+                cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
+                key = cv2.waitKey(1) & 0xFF
+        else:
+            key = -1
+
+        if key == 27:
+            cap.release()
+            cv2.destroyAllWindows()
+            sys.exit(0)
+        if phase == "swap_wait" and key == ord(' '):
+            calib_start = time.time()
+            phase = "warmup_2"
 
     # Hitung hasil kalibrasi
     if len(calib_ratios_1) < 3:
@@ -189,7 +196,7 @@ def run_calib_1p_2p(get_frame, cap, aruco, yolo, midas, headless, true_height, t
     return calib_data
 
 
-def run_calib_zgrid(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions):
+def run_calib_zgrid(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions, gui=None):
     print("━" * 55)
     print(f"  ⚙  Z-GRID CALIBRATION ({n_positions} positions)")
     print(f"     Cup reference height: {true_height} cm")
@@ -295,13 +302,20 @@ def run_calib_zgrid(get_frame, cap, aruco, yolo, midas, headless, true_height, n
             cv2.putText(disp_c, "Press SPACE when ready.", (int(45*S), int(110*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (100, 255, 100), 2)
 
         if not headless:
-            cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27:
-                cap.release(); cv2.destroyAllWindows(); sys.exit(0)
-            if phase == "swap_wait" and key == ord(' '):
-                calib_start = time.time()
-                phase = "warmup"
+            if gui:
+                gui.update_image(disp_c)
+                key = gui.get_key()
+            else:
+                cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
+                key = cv2.waitKey(1) & 0xFF
+        else:
+            key = -1
+            
+        if key == 27:
+            cap.release(); cv2.destroyAllWindows(); sys.exit(0)
+        if phase == "swap_wait" and key == ord(' '):
+            calib_start = time.time()
+            phase = "warmup"
 
         if phase == "done":
             break
@@ -327,7 +341,7 @@ def run_calib_zgrid(get_frame, cap, aruco, yolo, midas, headless, true_height, n
     return calib_data
 
 
-def run_calib_bbox(get_frame, cap, aruco, yolo, midas, headless, true_height):
+def run_calib_bbox(get_frame, cap, aruco, yolo, midas, headless, true_height, gui=None):
     print("━" * 55)
     print("  ⚙  BBOX AREA COMPENSATION CALIBRATION (Type 4)")
     print(f"     Cup reference height: {true_height} cm")
@@ -428,11 +442,18 @@ def run_calib_bbox(get_frame, cap, aruco, yolo, midas, headless, true_height):
             cv2.putText(disp_c,"Press SPACE when ready.",(int(45*S), int(110*S)),cv2.FONT_HERSHEY_SIMPLEX,0.5 * S,(100,255,100),2)
 
         if not headless:
-            cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27: cap.release(); cv2.destroyAllWindows(); sys.exit(0)
-            if phase == "swap_wait" and key == ord(' '):
-                calib_start = time.time(); phase = "warmup"
+            if gui:
+                gui.update_image(disp_c)
+                key = gui.get_key()
+            else:
+                cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
+                key = cv2.waitKey(1) & 0xFF
+        else:
+            key = -1
+
+        if key == 27: cap.release(); cv2.destroyAllWindows(); sys.exit(0)
+        if phase == "swap_wait" and key == ord(' '):
+            calib_start = time.time(); phase = "warmup"
 
     if len(positions_4) < 2:
         print("[CALIB] Not enough BBox position data. Aborting.")
@@ -455,7 +476,7 @@ def run_calib_bbox(get_frame, cap, aruco, yolo, midas, headless, true_height):
     return calib_data
 
 
-def run_calib_geom(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions):
+def run_calib_geom(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions, gui=None):
     focal_length_px = aruco.camera_matrix[0, 0]
     print("━" * 55)
     print(f"  ⚙  GEOMETRIC Z-GRID CALIBRATION ({n_positions} positions)")
@@ -547,12 +568,19 @@ def run_calib_geom(get_frame, cap, aruco, yolo, midas, headless, true_height, n_
             cv2.putText(disp_c, "Wait for focus, then press SPACE.", (int(45*S), int(90*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (200, 220, 255), 2)
 
         if not headless:
-            cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27: cap.release(); cv2.destroyAllWindows(); sys.exit(0)
-            if phase == "swap_wait" and key == ord(' '):
-                calib_start = time.time(); phase = "warmup"
-                current_g_z, current_g_h = [], []
+            if gui:
+                gui.update_image(disp_c)
+                key = gui.get_key()
+            else:
+                cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
+                key = cv2.waitKey(1) & 0xFF
+        else:
+            key = -1
+
+        if key == 27: cap.release(); cv2.destroyAllWindows(); sys.exit(0)
+        if phase == "swap_wait" and key == ord(' '):
+            calib_start = time.time(); phase = "warmup"
+            current_g_z, current_g_h = [], []
 
     # Polynomial Fit
     Z_pts = np.array([p["Z"] for p in grid_data])
@@ -569,7 +597,7 @@ def run_calib_geom(get_frame, cap, aruco, yolo, midas, headless, true_height, n_
     return calib_data
 
 
-def run_calib_bilateral(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, n_positions):
+def run_calib_bilateral(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, n_positions, gui=None):
     print("━" * 55)
     print(f"  ⚙  BILATERAL Z-GRID CALIBRATION ({n_positions} positions X 2 cups)")
     print(f"     Cup 1 height : {true_height} cm")
@@ -706,14 +734,21 @@ def run_calib_bilateral(get_frame, cap, aruco, yolo, midas, headless, true_heigh
             cv2.putText(disp_c, f"Wait for focus. PLACE {true_height}cm CUP. SPACE.", (int(45*S), int(95*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (200, 220, 255), 2)
 
         if not headless:
-            cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27: cap.release(); cv2.destroyAllWindows(); sys.exit(0)
-            if key == ord(' '):
-                if phase == "swap_c2":
-                    phase = "warmup_c2"; calib_start = time.time()
-                elif phase == "swap_z":
-                    phase = "warmup_c1"; calib_start = time.time()
+            if gui:
+                gui.update_image(disp_c)
+                key = gui.get_key()
+            else:
+                cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
+                key = cv2.waitKey(1) & 0xFF
+        else:
+            key = -1
+            
+        if key == 27: cap.release(); cv2.destroyAllWindows(); sys.exit(0)
+        if key == ord(' '):
+            if phase == "swap_c2":
+                phase = "warmup_c2"; calib_start = time.time()
+            elif phase == "swap_z":
+                phase = "warmup_c1"; calib_start = time.time()
 
     # Fit m(Z) and c(Z)
     deg = min(len(Z_pts)-1, 2)
@@ -727,7 +762,7 @@ def run_calib_bilateral(get_frame, cap, aruco, yolo, midas, headless, true_heigh
     return calib_data
 
 
-def run_calib_analytic(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2):
+def run_calib_analytic(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, gui=None):
     print("━" * 55)
     print("  ⚙  UNIVERSAL ANALYTIC GEOMETRY (Type 7 - Fast & Perfect)")
     print(f"     Cup 1 height : {true_height} cm")
@@ -823,10 +858,17 @@ def run_calib_analytic(get_frame, cap, aruco, yolo, midas, headless, true_height
                 cv2.putText(disp_c, f"Sampling [{len(y_samples_2)}/30]", (18, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 150), 1)
 
         if not headless:
-            cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27: cap.release(); sys.exit(0)
-            if phase == "swap" and key == ord(' '):
-                phase = "warmup_2"; calib_start = time.time()
+            if gui:
+                gui.update_image(disp_c)
+                key = gui.get_key()
+            else:
+                cv2.imshow("ArUco + MiDaS | Cup Height Estimator", disp_c)
+                key = cv2.waitKey(1) & 0xFF
+        else:
+            key = -1
+            
+        if key == 27: cap.release(); sys.exit(0)
+        if phase == "swap" and key == ord(' '):
+            phase = "warmup_2"; calib_start = time.time()
 
     return calib_data

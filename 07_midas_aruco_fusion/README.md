@@ -19,10 +19,16 @@ Jika memakai kamera fisheye berekstensi lebar seperti **LRCP + IMX586**, distors
 ```bash
 # Tidak perlu kalibrasi manual! Profil sudah tersedia di camera_parameters.json.
 # Cukup jalankan langsung dengan --fisheye dan nama profil yang sesuai:
-python run_fusion.py --fisheye --moil-camera-name lrcp_imx586_240_17 --calibrate 5 --true-height 7.6
+python run_fusion.py --fisheye --moil-camera-name syue_7730v1_6 --calibrate 5 --true-height 7.6
 ```
 
 > **Catatan**: Untuk kamera biasa (tanpa fisheye), **hapus flag `--fisheye`**. Moildev tidak aktif dan pipeline berjalan seperti biasa.
+
+### Uji Coba Mode Anypoint (Baru!)
+Anda dapat membandingkan **Mode 1 (Alpha/Beta)** dan **Mode 2 (Pitch/Yaw/Roll)** secara visual sebelum menjalankan kalibrasi menggunakan script interaktif:
+```bash
+python compare_anypoint_modes.py --camera 0 --camera-name syue_7730v1_6
+```
 
 ### 2. Pendaftaran Profil Mangkuk (Kalibrasi Mode 5)
 Latih program di mana posisi aman gelas berukuran tertentu (misal: menu gelas `7.6` cm). Program akan merekam persentase *clipping* kedalaman secara otomatis (*PolyFit*).
@@ -57,11 +63,12 @@ python run_fusion.py --camera 0 --fisheye --target-cup 7.6
 | `--target-cup` | `None` | (Produksi Live) Ukuran referensi *Cup* mana yang ditarik |
 | `--cup-profile` | `default` | Nama profil simpanan (misal `--cup-profile mesinB`) |
 | `--fisheye` | `False` | Aktifkan mode Moildev fisheye undistortion |
-| `--moil-camera-name` | `lrcp_imx586_240_17` | Nama profil di `camera_parameters.json` |
-| `--moil-pitch` | `-90.0` | Anypoint pitch (°) — default kamera menghadap ke bawah |
-| `--moil-yaw` | `0.0` | Anypoint yaw (°) |
-| `--moil-roll` | `0.0` | Anypoint roll (°) |
-| `--moil-zoom` | `2.0` | Zoom factor anypoint Moildev |
+| `--moil-camera-name` | `syue_7730v1_6` | Nama profil di `camera_parameters.json` |
+| `--moil-mode` | `2` | Mode anypoint: `1` (Alpha/Beta) atau `2` (Pitch/Yaw/Roll) |
+| `--moil-pitch` | `0.0` | Anypoint pitch / Alpha (°) — geser dengan drag atas/bawah |
+| `--moil-yaw` | `0.0` | Anypoint yaw / Beta (°) — geser dengan drag kiri/kanan |
+| `--moil-roll` | `0.0` | Anypoint roll (°) — hanya di Mode 2 |
+| `--moil-zoom` | `1.4` | Zoom factor anypoint Moildev — geser dengan roda mouse |
 | `--n-positions` | `3` | Hitungan fase titik berhenti (*Z-Grid*) yang harus dipelajari |
 | `--headless` | `False` | Sembunyikan *Window* saat mesin ditanam di `Kakip RZ/V2H` |
 

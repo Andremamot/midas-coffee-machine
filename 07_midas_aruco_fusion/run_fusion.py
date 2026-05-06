@@ -24,8 +24,15 @@ import core.height_math as hm
 import core.session_reporter as sr
 from core.moil_undistorter import MoilUndistorter
 from core.anypoint_controller import AnypointController
+from core.image_preprocess import normalize_lighting
 
 import cv2
+# KRITIS: Matikan OpenCL sepenuhnya.
+# OpenCL context TIDAK thread-safe saat diakses dari multiple pipeline
+# (Moildev remap + YOLO + MiDaS + GTK rendering) → menyebabkan
+# "terminate called without an active exception" (SIGABRT) dan SIGSEGV.
+# CPU-only mode lebih lambat tapi 100% stabil.
+cv2.ocl.setUseOpenCL(False)
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -130,6 +137,38 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
         cap.release()
         return
 
+    # Baca exposure aktual dari kamera setelah warmup
+    actual_exposure_raw = int(cap.get(cv2.CAP_PROP_EXPOSURE))
+
+    # Sanity check: jika nilai terlalu rendah (< 100), kamera mungkin mewarisi state buruk
+    # dari sesi sebelumnya (mis. test diagnostik yang meninggalkan exposure=1).
+    # Reset ke auto sebentar lalu baca ulang.
+    if actual_exposure_raw < 100:
+        print(f"[CAM] Exposure terdeteksi tidak valid ({actual_exposure_raw}), reset ke auto...")
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # auto mode
+        time.sleep(2.0)
+        for _ in range(10):
+            cap.grab()
+        actual_exposure_raw = int(cap.get(cv2.CAP_PROP_EXPOSURE))
+        print(f"[CAM] Setelah reset auto: exposure = {actual_exposure_raw}")
+
+    if args.manual_exposure <= 0:
+        args.manual_exposure = actual_exposure_raw
+        print(f"[CAM] Exposure aktual terdeteksi: {actual_exposure_raw} (raw) = {actual_exposure_raw/1000:.1f} detik")
+
+
+    # ── KRITIS: Paksa kamera ke Manual Mode dengan nilai yang sama ──────────────
+    # Saat warmup, kamera dalam mode Auto-Exposure. Jika dibiarkan, gambar di startup
+    # akan terlihat berbeda dari setelah user pertama kali mengubah exposure (yang
+    # memaksa masuk ke manual mode). Dengan mengunci ke manual mode sekarang,
+    # kondisi startup konsisten dengan kondisi setelah penyesuaian exposure.
+    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)          # 1 = Manual Mode V4L2
+    cap.set(cv2.CAP_PROP_EXPOSURE, args.manual_exposure)
+    # Flush buffer agar frame dengan exposure baru langsung tampil
+    for _ in range(4):
+        cap.grab()
+    print(f"[CAM] Manual mode dikunci: exposure={args.manual_exposure} raw ({args.manual_exposure/1000:.1f})")
+
 
     # ── Inisiasi Moildev undistorter (hanya jika --fisheye aktif) ─────────────
     moil_undistorter = None
@@ -151,6 +190,7 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
                 yaw          = moil_yaw,
                 roll         = moil_roll,
                 zoom         = moil_zoom,
+                mode         = getattr(args, "moil_mode", 2),
                 use_opencl   = True,
                 frame_width  = w,
                 frame_height = h,
@@ -174,93 +214,240 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
 
     WIN_NAME = "ArUco + MiDaS | Cup Height Estimator"
 
+    # Shared state untuk status LED — dibaca oleh live_pipeline untuk UI
+    _led_state = {"detected": False}
+    _last_exposure_change_t = [0.0]  # track waktu terakhir exposure diubah
+
+    _fps_prev_t = [time.time()]  # FPS tracker untuk overlay
+
+    # GUI shared state — harus didefinisikan SEBELUM _camera_reader
+    gui_desired_exposure = [args.manual_exposure]
+    gui_desired_gain     = [128]
+    gui_desired_bri      = [0]
+
+    # ── Threaded Camera Reader ──────────────────────────────────────────────
+    # cap.read() memblokir ~300-500ms per frame di resolusi 2592x1944.
+    # Threaded reader membaca terus di background → get_frame() langsung ambil
+    # frame terbaru tanpa menunggu kamera.
+    import threading as _thr
+    _cam_frame = [None]       # frame terbaru dari kamera
+    _cam_ret   = [False]
+    _cam_lock  = _thr.Lock()
+    _cam_alive = [True]
+
+    def _camera_reader():
+        """Background thread: baca frame terus-menerus dari kamera."""
+        while _cam_alive[0]:
+            # Terapkan perubahan hardware sekaligus (atomik)
+            if (gui_desired_exposure[0] != args.manual_exposure or
+                gui_desired_gain[0] != getattr(args, '_current_gain', 128) or
+                gui_desired_bri[0] != getattr(args, '_current_bri', 0)):
+                if cap and cap.isOpened():
+                    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+                    cap.set(cv2.CAP_PROP_EXPOSURE, gui_desired_exposure[0])
+                    cap.set(cv2.CAP_PROP_GAIN, gui_desired_gain[0])
+                    cap.set(cv2.CAP_PROP_BRIGHTNESS, gui_desired_bri[0])
+                    args.manual_exposure = gui_desired_exposure[0]
+                    args._current_gain = gui_desired_gain[0]
+                    args._current_bri = gui_desired_bri[0]
+                    _last_exposure_change_t[0] = time.time()
+                    print(f"[CAM] HW applied: exp={args.manual_exposure} gain={args._current_gain} bri={args._current_bri}")
+
+            ret, frame = cap.read()
+            with _cam_lock:
+                _cam_ret[0] = ret
+                _cam_frame[0] = frame
+
+    # NOTE: Thread distart SETELAH GUI init — lihat bawah
+
     def get_frame():
-        r, f = cap.read()
-        if not r:
+        # Ambil frame terbaru dari threaded reader (non-blocking)
+        with _cam_lock:
+            ret = _cam_ret[0]
+            f = _cam_frame[0]
+            _cam_frame[0] = None  # tandai sudah diambil
+
+        if not ret or f is None:
             return False, None
-            
+
+
         # Force resize if camera hardware ignores our requested resolution
         if f.shape[1] != cap_width or f.shape[0] != cap_height:
             f = cv2.resize(f, (cap_width, cap_height), interpolation=cv2.INTER_LINEAR)
-            
+
+        # ── Software lighting normalization ────────────────────────────────
+        normalize_active = True
+        if gui is not None:
+            normalize_active = gui.is_normalize_enabled()
+
+        if args.manual_exposure > 0 and normalize_active:
+            f, led_on = normalize_lighting(f)
+            _led_state["detected"] = led_on
+
         if moil_undistorter is not None and not no_anypoint:
             f = moil_undistorter.undistort(f)
             if anypoint_ctrl is not None and not headless:
                 anypoint_ctrl.draw_overlay(f)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('r') or key == ord('R'):
-                    anypoint_ctrl.reset()
-                    print(f"[MOIL] Reset anypoint → pitch={moil_undistorter.pitch}, yaw={moil_undistorter.yaw}, zoom={moil_undistorter.zoom}")
-                elif key == ord('s') or key == ord('S'):
-                    print(f"[MOIL] Current params: --moil-pitch {moil_undistorter.pitch:.1f} "
-                          f"--moil-yaw {moil_undistorter.yaw:.1f} "
-                          f"--moil-roll {moil_undistorter.roll:.1f} "
-                          f"--moil-zoom {moil_undistorter.zoom:.2f}")
                 
+                # Hanya panggil cv2.waitKey jika TIDAK pakai GUI GTK
+                # Memanggil cv2.waitKey di background thread saat GTK aktif akan menyebabkan SIGABRT!
+                if gui is None:
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('r') or key == ord('R'):
+                        anypoint_ctrl.reset()
+                        print(f"[MOIL] Reset anypoint → pitch={moil_undistorter.pitch}, yaw={moil_undistorter.yaw}, zoom={moil_undistorter.zoom}")
+                    elif key == ord('s') or key == ord('S'):
+                        print(f"[MOIL] Current params: --moil-pitch {moil_undistorter.pitch:.1f} "
+                              f"--moil-yaw {moil_undistorter.yaw:.1f} "
+                              f"--moil-roll {moil_undistorter.roll:.1f} "
+                              f"--moil-zoom {moil_undistorter.zoom:.2f}")
+
                 # SANGAT PENTING: Update camera matrix ArUco secara dinamis setiap frame!
                 # Jika user melakukan zoom in/out, focal length ekuivalen berubah.
                 # Ini mencegah jarak mendadak salah saat user melakukan scroll.
                 aruco.camera_matrix = moil_undistorter.build_aruco_camera_matrix(f.shape[1], f.shape[0])
-                
+
+        # ── FPS overlay (pojok kiri bawah, skala proporsional ke resolusi) ─
+        now_t = time.time()
+        dt = now_t - _fps_prev_t[0]
+        _fps_prev_t[0] = now_t
+        fps_val = 1.0 / dt if dt > 0 else 0
+        h_f, w_f = f.shape[:2]
+        _S = max(1.0, w_f / 1280.0)  # skala teks proporsional ke lebar frame
+        cv2.putText(f, f"FPS: {fps_val:.1f}", (int(10*_S), h_f - int(20*_S)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7 * _S, (0, 255, 0), max(2, int(2*_S)))
+
         return True, f
 
 
+    import threading
+    from core.gui_fusion import FusionGUI
+    gui = None
 
-    # ── Setup OpenCV window + mouse callback ─────────────────────────────────
+    def set_smart_exposure_cb(exp_val, gain_val, bri_val):
+        gui_desired_exposure[0] = exp_val
+        gui_desired_gain[0] = gain_val
+        gui_desired_bri[0] = bri_val
+        print(f"[GUI] Smart Exp applied -> Shutter: {exp_val}, ISO: {gain_val}, EV: {bri_val}")
+
     if not headless:
-        cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
-        if anypoint_ctrl is not None:
-            anypoint_ctrl.attach(WIN_NAME)
-            print("[MOIL] 🖱  Anypoint mouse control aktif:")
-            print("         Drag kiri-kanan → Yaw  |  Drag atas-bawah → Pitch")
-            print("         Scroll → Zoom  |  Tekan R → Reset  |  S → Print params")
+        import gi
+        gi.require_version('Gtk', '3.0')
+        from gi.repository import Gtk
+        gui = FusionGUI(moil_undistorter=moil_undistorter, headless=False,
+                        initial_exposure=args.manual_exposure,
+                        exposure_callback=set_smart_exposure_cb)
+        gui_desired_exposure[0] = args.manual_exposure
+        # Sinkronkan gain/brightness aktual dari hardware
+        actual_gain = int(cap.get(cv2.CAP_PROP_GAIN))
+        actual_bri = int(cap.get(cv2.CAP_PROP_BRIGHTNESS))
+        gui_desired_gain[0] = actual_gain
+        gui_desired_bri[0] = actual_bri
+        print("[GUI] GTK3 Interface Active")
+    else:
+        gui = FusionGUI(moil_undistorter=moil_undistorter, headless=True,
+                        initial_exposure=args.manual_exposure,
+                        exposure_callback=set_smart_exposure_cb)
 
-    # Delegate to calibration routines
-    import core.calibration_routines as calib_rt
-    
-    if calibrate_mode in (1, 2):
-        calib_data = calib_rt.run_calib_1p_2p(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, calibrate_mode)
-    elif calibrate_mode == 3:
-        calib_data = calib_rt.run_calib_zgrid(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions)
-    elif calibrate_mode == 4:
-        calib_data = calib_rt.run_calib_bbox(get_frame, cap, aruco, yolo, midas, headless, true_height)
-    elif calibrate_mode == 5:
-        calib_data = calib_rt.run_calib_geom(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions)
-    elif calibrate_mode == 6:
-        calib_data = calib_rt.run_calib_bilateral(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, n_positions)
-    elif calibrate_mode == 7:
-        calib_data = calib_rt.run_calib_analytic(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2)
-    elif calibrate_mode != 0:
-        print("[ERROR] Unknown calibration mode")
-        return
+    # Start camera reader thread SETELAH gui_desired_* sudah siap
+    _cam_thread = _thr.Thread(target=_camera_reader, daemon=True)
+    _cam_thread.start()
+        
+    # Delegate to calibration routines in a background thread
+    def worker_thread():
+        import core.calibration_routines as calib_rt
+        
+        # ── Setup Mode (Preview sebelum kalibrasi dimulai) ──────────────────────
+        if calibrate_mode != 0 and gui and not headless:
+            calib_names = {
+                1: "1-Point", 2: "2-Point", 3: "Z-Grid", 
+                4: "BBox", 5: "Geometric", 6: "Bilateral", 7: "Analytic"
+            }
+            cname = calib_names.get(calibrate_mode, "Unknown")
+            gui.enter_setup_mode(cname)
+            print(f"[SETUP] Waiting for user to configure camera and start {cname} calibration...")
+            
+            while not gui.calibration_ready_event.is_set():
+                ret, frame = get_frame()
+                if not ret:
+                    break
+                
+                gui.update_image(frame)
+                key = gui.get_key()
+                if key == 27:  # ESC pressed during setup
+                    print("[SETUP] Aborted by user.")
+                    return
+        
+        calib_data = None
+        if calibrate_mode in (1, 2):
+            calib_data = calib_rt.run_calib_1p_2p(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, calibrate_mode, gui)
+        elif calibrate_mode == 3:
+            calib_data = calib_rt.run_calib_zgrid(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions, gui)
+        elif calibrate_mode == 4:
+            calib_data = calib_rt.run_calib_bbox(get_frame, cap, aruco, yolo, midas, headless, true_height, gui)
+        elif calibrate_mode == 5:
+            calib_data = calib_rt.run_calib_geom(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions, gui)
+        elif calibrate_mode == 6:
+            calib_data = calib_rt.run_calib_bilateral(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, n_positions, gui)
+        elif calibrate_mode == 7:
+            calib_data = calib_rt.run_calib_analytic(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, gui)
+        elif calibrate_mode != 0:
+            print("[ERROR] Unknown calibration mode")
+            if gui and not headless: gui.queue_key(27)
+            return
 
-    if calib_data is None:
-        print("[CALIB] Error or Aborted. Exiting.")
-        return
+        if calib_data is None and calibrate_mode != 0:
+            print("[CALIB] Error or Aborted. Exiting.")
+            if gui and not headless: gui.queue_key(27)
+            return
 
-    active_poly_Kgeom = [1.0]
-    active_cup_str = "LEGACY (1 Profile)"
-    if calib_data.get("type") == 5:
-        if "profiles" in calib_data:
-            if getattr(args, "target_cup", None):
-                target_str = str(args.target_cup)
-                if target_str in calib_data["profiles"]:
-                    active_poly_Kgeom = calib_data["profiles"][target_str]["poly_Kgeom"]
-                    active_cup_str = target_str
+        active_poly_Kgeom = [1.0]
+        active_cup_str = "LEGACY (1 Profile)"
+        if calib_data and calib_data.get("type") == 5:
+            if "profiles" in calib_data:
+                if getattr(args, "target_cup", None):
+                    target_str = str(args.target_cup)
+                    if target_str in calib_data["profiles"]:
+                        active_poly_Kgeom = calib_data["profiles"][target_str]["poly_Kgeom"]
+                        active_cup_str = target_str
+                    else:
+                        keys = list(calib_data["profiles"].keys())
+                        active_cup_str = keys[0] if keys else "Unknown"
+                        active_poly_Kgeom = calib_data["profiles"][active_cup_str].get("poly_Kgeom", [1.0]) if keys else [1.0]
                 else:
                     keys = list(calib_data["profiles"].keys())
                     active_cup_str = keys[0] if keys else "Unknown"
                     active_poly_Kgeom = calib_data["profiles"][active_cup_str].get("poly_Kgeom", [1.0]) if keys else [1.0]
             else:
-                keys = list(calib_data["profiles"].keys())
-                active_cup_str = keys[0] if keys else "Unknown"
-                active_poly_Kgeom = calib_data["profiles"][active_cup_str].get("poly_Kgeom", [1.0]) if keys else [1.0]
-        else:
-            active_poly_Kgeom = calib_data.get("poly_Kgeom", [1.0])
+                active_poly_Kgeom = calib_data.get("poly_Kgeom", [1.0])
+                
+        # Pasang _led_state ke args agar live_pipeline bisa membaca status LED via UI
+        args._led_state = _led_state if args.manual_exposure > 0 else None
+
+        # Delegate to live pipeline
+        import core.live_pipeline as live_pipe
+        
+        if gui and not headless:
+            import gi
+            gi.require_version('Gtk', '3.0')
+            from gi.repository import GLib
+            # Update Mode label
+            GLib.idle_add(gui.lbl_status_calib.set_text, f"Mode: Live ({active_cup_str})")
             
-    # Delegate to live pipeline
-    import core.live_pipeline as live_pipe
-    live_pipe.run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, marker_size, active_poly_Kgeom, active_cup_str, args, SCREENSHOT_DIR, VIDEO_DIR)
+        live_pipe.run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, marker_size, active_poly_Kgeom, active_cup_str, args, SCREENSHOT_DIR, VIDEO_DIR, gui)
+        
+        if gui and not headless:
+            gui.queue_key(27) # Trigger quit when done
+
+    thread = threading.Thread(target=worker_thread, daemon=True)
+    thread.start()
+
+    if not headless:
+        gui.show_all()
+        Gtk.main()
+    else:
+        # If headless, just wait for thread to finish
+        thread.join()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="ArUco + MiDaS Cup Height Estimator")
@@ -288,6 +475,8 @@ if __name__ == "__main__":
                     help="Anypoint roll dalam derajat (default: 0)")
     ap.add_argument("--moil-zoom",         type=float, default=1.4,
                     help="Zoom factor anypoint Moildev (default: 1.4)")
+    ap.add_argument("--moil-mode",         type=int, default=2,
+                    help="Mode anypoint: 1 (Alpha/Beta) atau 2 (Pitch/Yaw/Roll) (default: 2)")
     ap.add_argument("--no-anypoint",       action="store_true",
                     help="Gunakan fisheye mode tapi TANPA remap anypoint (frame raw fisheye)")
     ap.add_argument("--manual-exposure",   type=int,   default=0,
