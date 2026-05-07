@@ -24,6 +24,7 @@ def calculate_z_rim_multivariate(m_rim, m_tray, true_z_tray, c1, c2, c3, c4):
 def generate_report():
     # Look for snapshots in the new multivariate snapshot folder
     snapshot_dir = os.path.join(root_dir, "04_dataset", "test_snapshots")
+    # snapshot_dir = os.path.join(root_dir,"01_calibration","calibration_snapshots_multivariate")
     
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = os.path.join(os.path.dirname(__file__), "evaluation_results_multivariate", f"eval_{timestamp_str}")

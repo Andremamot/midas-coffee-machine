@@ -378,63 +378,76 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
                     print("[SETUP] Aborted by user.")
                     return
         
-        calib_data = None
+        # PENTING: Untuk mode kalibrasi, hasil kalibrasi disimpan di _calib_result.
+        # Untuk mode Live (calibrate_mode=0), gunakan calib_data dari luar (closure)
+        # yang sudah di-load dari JSON.
+        # JANGAN pakai nama 'calib_data' di sini karena Python akan membuat
+        # local variable baru yang menyembunyikan (shadow) outer variable!
+        _calib_result = None
         if calibrate_mode in (1, 2):
-            calib_data = calib_rt.run_calib_1p_2p(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, calibrate_mode, gui)
+            _calib_result = calib_rt.run_calib_1p_2p(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, calibrate_mode, gui)
         elif calibrate_mode == 3:
-            calib_data = calib_rt.run_calib_zgrid(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions, gui)
+            _calib_result = calib_rt.run_calib_zgrid(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions, gui)
         elif calibrate_mode == 4:
-            calib_data = calib_rt.run_calib_bbox(get_frame, cap, aruco, yolo, midas, headless, true_height, gui)
+            _calib_result = calib_rt.run_calib_bbox(get_frame, cap, aruco, yolo, midas, headless, true_height, gui)
         elif calibrate_mode == 5:
-            calib_data = calib_rt.run_calib_geom(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions, gui)
+            _calib_result = calib_rt.run_calib_geom(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions, gui)
         elif calibrate_mode == 6:
-            calib_data = calib_rt.run_calib_bilateral(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, n_positions, gui)
+            _calib_result = calib_rt.run_calib_bilateral(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, n_positions, gui)
         elif calibrate_mode == 7:
-            calib_data = calib_rt.run_calib_analytic(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, gui)
+            _calib_result = calib_rt.run_calib_analytic(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, gui)
         elif calibrate_mode != 0:
             print("[ERROR] Unknown calibration mode")
             if gui and not headless: gui.queue_key(27)
             return
 
-        if calib_data is None and calibrate_mode != 0:
+        # Mode Live: gunakan calib_data dari JSON (outer closure)
+        # Mode Kalibrasi: gunakan hasil kalibrasi baru
+        active_calib = _calib_result if calibrate_mode != 0 else calib_data
+
+        if active_calib is None and calibrate_mode != 0:
             print("[CALIB] Error or Aborted. Exiting.")
             if gui and not headless: gui.queue_key(27)
             return
 
+        print(f"[LIVE] calib_data type={type(active_calib)}, value={active_calib}")
+
         active_poly_Kgeom = [1.0]
         active_cup_str = "LEGACY (1 Profile)"
-        if calib_data and calib_data.get("type") == 5:
-            if "profiles" in calib_data:
+        if active_calib and active_calib.get("type") == 5:
+            if "profiles" in active_calib:
                 if getattr(args, "target_cup", None):
                     target_str = str(args.target_cup)
-                    if target_str in calib_data["profiles"]:
-                        active_poly_Kgeom = calib_data["profiles"][target_str]["poly_Kgeom"]
+                    if target_str in active_calib["profiles"]:
+                        active_poly_Kgeom = active_calib["profiles"][target_str]["poly_Kgeom"]
                         active_cup_str = target_str
                     else:
-                        keys = list(calib_data["profiles"].keys())
+                        keys = list(active_calib["profiles"].keys())
                         active_cup_str = keys[0] if keys else "Unknown"
-                        active_poly_Kgeom = calib_data["profiles"][active_cup_str].get("poly_Kgeom", [1.0]) if keys else [1.0]
+                        active_poly_Kgeom = active_calib["profiles"][active_cup_str].get("poly_Kgeom", [1.0]) if keys else [1.0]
                 else:
-                    keys = list(calib_data["profiles"].keys())
+                    keys = list(active_calib["profiles"].keys())
                     active_cup_str = keys[0] if keys else "Unknown"
-                    active_poly_Kgeom = calib_data["profiles"][active_cup_str].get("poly_Kgeom", [1.0]) if keys else [1.0]
+                    active_poly_Kgeom = active_calib["profiles"][active_cup_str].get("poly_Kgeom", [1.0]) if keys else [1.0]
             else:
-                active_poly_Kgeom = calib_data.get("poly_Kgeom", [1.0])
-                
+                active_poly_Kgeom = active_calib.get("poly_Kgeom", [1.0])
+
+        print(f"[LIVE] active_cup_str={active_cup_str}, poly_Kgeom={active_poly_Kgeom}")
+
         # Pasang _led_state ke args agar live_pipeline bisa membaca status LED via UI
         args._led_state = _led_state if args.manual_exposure > 0 else None
 
         # Delegate to live pipeline
         import core.live_pipeline as live_pipe
-        
+
         if gui and not headless:
             import gi
             gi.require_version('Gtk', '3.0')
             from gi.repository import GLib
             # Update Mode label
             GLib.idle_add(gui.lbl_status_calib.set_text, f"Mode: Live ({active_cup_str})")
-            
-        live_pipe.run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, marker_size, active_poly_Kgeom, active_cup_str, args, SCREENSHOT_DIR, VIDEO_DIR, gui)
+
+        live_pipe.run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, active_calib, marker_size, active_poly_Kgeom, active_cup_str, args, SCREENSHOT_DIR, VIDEO_DIR, gui)
         
         if gui and not headless:
             gui.queue_key(27) # Trigger quit when done
@@ -448,6 +461,16 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
     else:
         # If headless, just wait for thread to finish
         thread.join()
+
+    # ── Cleanup yang benar untuk menghindari SIGABRT ──
+    # Beritahu background thread untuk berhenti membaca frame
+    _cam_alive[0] = False
+    if _cam_thread.is_alive():
+        _cam_thread.join(timeout=1.0)
+    
+    # Release hardware kamera setelah thread reader dipastikan mati
+    if cap and cap.isOpened():
+        cap.release()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="ArUco + MiDaS Cup Height Estimator")

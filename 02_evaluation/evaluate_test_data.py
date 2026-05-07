@@ -18,8 +18,8 @@ from midas_volumecup.volume_math import calculate_z_rim, calculate_z_rim_alpha
 
 def generate_report():
     # Look for snapshots in the dataset folder
-    # snapshot_dir = os.path.join(root_dir, "04_dataset", "test_snapshots")
-    snapshot_dir = os.path.join(root_dir, "01_calibration", "calibration_snapshots")
+    snapshot_dir = os.path.join(root_dir, "04_dataset", "test_snapshots")
+    # snapshot_dir = os.path.join(root_dir, "01_calibration", "calibration_snapshots")
     
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = os.path.join(os.path.dirname(__file__), "evaluation_results", f"eval_{timestamp_str}")

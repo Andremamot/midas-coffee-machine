@@ -1,10 +1,14 @@
 import time
 import cv2
 import numpy as np
+import threading
 import core.height_math as hm
 import core.session_reporter as sr
 import os
 from datetime import datetime
+
+# Lock global untuk melindungi MiDaS inference dari re-entrancy di multi-thread GTK
+_midas_lock = threading.Lock()
 
 try:
     import gi
@@ -26,6 +30,9 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
     cup_heights_ema: list = [None, None]
     last_depth_norm = None
     EMA_ALPHA = 0.35
+
+    # ctype 5 (Geometric) dan 7 (Analytic) tidak butuh MiDaS untuk height
+    _ctype_no_midas = {5, 7}
 
     is_recording = False
     video_writer = None
@@ -69,54 +76,93 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
                         pad_y  = max(2, (y2 - y1) // 10)
                         aruco_roi = (x1 + pad_x, y1 + pad_y, x2 - pad_x, y2 - pad_y)
 
-            # Deteksi YOLO secara kontinu untuk visual feedback yang smooth (tanpa delay MiDaS)
+            # ── Deteksi YOLO setiap frame ──────────────────────────────────────
             boxes = yolo.detect(frame)
-            
-            if (now - last_midas_t) >= midas_interval and z_tray_live > 0 and aruco_roi:
-                if boxes:
-                    # Sort left-to-right to keep cup ordering consistent
-                    boxes = sorted(boxes, key=lambda b: b["bbox"][0])
-                    boxes = boxes[:2]
-                    cup_bboxes = [b["bbox"] for b in boxes]
-                    
-                    depth_map  = midas.process(frame)
-                    stats_midas_runs += 1
+            ctype_now = (calib_data or {}).get("type", 1)
 
+            # ── Fast-path: hitung height SETIAP frame untuk Geometric/Analytic ─
+            # Tidak perlu menunggu MiDaS — cukup bbox YOLO + jarak ArUco
+            if ctype_now in _ctype_no_midas and z_tray_live > 0 and boxes:
+                boxes_sorted = sorted(boxes, key=lambda b: b["bbox"][0])[:2]
+                cup_bboxes = [b["bbox"] for b in boxes_sorted]
+                for i, bbox in enumerate(cup_bboxes):
+                    height_raw = 0.0
+                    if calib_data is not None:
+                        if ctype_now == 5:
+                            focal_px = aruco.camera_matrix[0, 0]
+                            height_raw = hm.calc_height_geom(z_tray_live, bbox, focal_px, active_poly_Kgeom)
+                        else:  # ctype 7
+                            height_raw = hm.calc_height_analytic(z_tray_live, bbox, calib_data.get("A", 0.0), calib_data.get("B", 0.0))
+                    if i == 0 and stats_total_frames % 30 == 1:
+                        x1d, y1d, x2d, y2d = bbox
+                        print(f"[DBG] ctype={ctype_now} | z={z_tray_live:.1f}cm | bbox_h={y2d-y1d}px | focal={aruco.camera_matrix[0,0]:.0f} | h={height_raw:.2f}cm")
+                    if height_raw > 0:
+                        if cup_heights_ema[i] is None:
+                            cup_heights_ema[i] = height_raw
+                        else:
+                            cup_heights_ema[i] = (EMA_ALPHA * height_raw) + ((1.0 - EMA_ALPHA) * cup_heights_ema[i])
+                    else:
+                        cup_heights_ema[i] = None
+                # Reset slot yang tidak terdeteksi
+                for i in range(len(cup_bboxes), 2):
+                    cup_heights_ema[i] = None
+            elif ctype_now in _ctype_no_midas and not boxes:
+                # YOLO tidak deteksi apa-apa: reset
+                cup_bboxes = []
+                for i in range(2):
+                    cup_heights_ema[i] = None
+
+            # ── MiDaS rate-limited block (untuk SEMUA ctype) ──────────────────
+            # - Semua ctype: update depth PiP visualization
+            # - Hanya ctype depth-based (1-4, 6): hitung height dari depth data
+            if (now - last_midas_t) >= midas_interval and z_tray_live > 0 and aruco_roi:
+                _boxes_now = boxes if boxes else []
+
+                # Update cup_bboxes untuk depth-based modes
+                if ctype_now not in _ctype_no_midas and _boxes_now:
+                    bs = sorted(_boxes_now, key=lambda b: b["bbox"][0])[:2]
+                    cup_bboxes = [b["bbox"] for b in bs]
+
+                # Jalankan MiDaS (dengan lock untuk thread safety)
+                try:
+                    with _midas_lock:
+                        depth_map = midas.process(frame)
+                    stats_midas_runs += 1
                     depth_norm = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
                     last_depth_norm = depth_norm
-                    m_tray = midas.get_tray_depth(depth_map, aruco_roi)
+                except Exception as _e:
+                    print(f"[MIDAS] Inference error (skipped): {_e}")
+                    last_midas_t = now
+                    continue
 
-                    if m_tray > 0:
-                        ctype = (calib_data or {}).get("type", 1)
+                # Hitung height dari depth — HANYA untuk depth-based modes
+                if ctype_now not in _ctype_no_midas:
+                    if _boxes_now:
+                        m_tray = midas.get_tray_depth(depth_map, aruco_roi)
                         for i in range(2):
                             if i < len(cup_bboxes):
                                 bbox = cup_bboxes[i]
                                 m_rim = midas.get_rim_depth(depth_map, bbox)
-                                if m_rim > 0 and calib_data is not None:
-                                    if ctype == 2:
+                                height_raw = 0.0
+
+                                if calib_data is not None and m_tray > 0 and m_rim > 0:
+                                    if ctype_now == 2:
                                         height_raw = hm.calc_height_2point(m_rim, m_tray, z_tray_live, calib_data.get("m", 0.1), calib_data.get("c", 0.0))
-                                    elif ctype == 3:
+                                    elif ctype_now == 3:
                                         height_raw = hm.calc_height_zgrid(m_rim, m_tray, z_tray_live, calib_data.get("poly_K", [0.8]))
-                                    elif ctype == 4:
+                                    elif ctype_now == 4:
                                         height_raw = hm.calc_height_bbox(m_rim, m_tray, z_tray_live, bbox, calib_data.get("m_ref", 0.15), calib_data.get("c_ref", 0.0), calib_data.get("ref_bbox_area_px", 10000.0))
-                                    elif ctype == 5:
-                                        focal_px = aruco.camera_matrix[0, 0]
-                                        height_raw = hm.calc_height_geom(z_tray_live, bbox, focal_px, active_poly_Kgeom)
-                                    elif ctype == 6:
+                                    elif ctype_now == 6:
                                         height_raw = hm.calc_height_bilateral_zgrid(m_rim, m_tray, z_tray_live, calib_data.get("poly_m", [0.1, 0]), calib_data.get("poly_c", [0.0, 0]))
-                                    elif ctype == 7:
-                                        height_raw = hm.calc_height_analytic(z_tray_live, bbox, calib_data.get("A", 0.0), calib_data.get("B", 0.0))
                                     else:
                                         height_raw = hm.calc_height_1point(m_rim, m_tray, z_tray_live, calib_data.get("K", 0.8))
 
-                                    if height_raw > 0:
-                                        if cup_heights_ema[i] is None:
-                                            cup_heights_ema[i] = height_raw
-                                        else:
-                                            cup_heights_ema[i] = (EMA_ALPHA * height_raw) + ((1.0 - EMA_ALPHA) * cup_heights_ema[i])
-                                        history_cup_h[i].append(cup_heights_ema[i])
+                                if height_raw > 0:
+                                    if cup_heights_ema[i] is None:
+                                        cup_heights_ema[i] = height_raw
                                     else:
-                                        history_cup_h[i].append(0.0)
+                                        cup_heights_ema[i] = (EMA_ALPHA * height_raw) + ((1.0 - EMA_ALPHA) * cup_heights_ema[i])
+                                    history_cup_h[i].append(cup_heights_ema[i])
                                 else:
                                     cup_heights_ema[i] = None
                                     history_cup_h[i].append(0.0)
@@ -126,14 +172,13 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
 
                         history_z_tray.append(z_tray_live)
                         history_frames.append(stats_total_frames)
-
-                else:
-                    cup_bboxes = []
-                    for i in range(2):
-                        cup_heights_ema[i] = None
-                        history_cup_h[i].append(0.0)
-                    history_z_tray.append(z_tray_live)
-                    history_frames.append(stats_total_frames)
+                    else:
+                        cup_bboxes = []
+                        for i in range(2):
+                            cup_heights_ema[i] = None
+                            history_cup_h[i].append(0.0)
+                        history_z_tray.append(z_tray_live)
+                        history_frames.append(stats_total_frames)
 
                 last_midas_t = now
 
@@ -146,8 +191,9 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
                 x1c, y1c, x2c, y2c = bbox
                 cv2.rectangle(disp, (x1c, y1c), (x2c, y2c), (0, 255, 80), 5)
 
-            # UI Scaling factor (2.5x for 2.5K resolution)
-            S = 2.5
+            # UI Scaling factor (dinamis berdasarkan lebar frame)
+            # Baseline: frame 2592x1944 -> S ≈ 2.5
+            S = max(0.5, w_frame / 1000.0)
             panel_w, panel_h = int(520 * S), int(135 * S)
             cv2.rectangle(disp, (20, 20), (20 + panel_w, 20 + panel_h), (25, 25, 25), -1)
             cv2.rectangle(disp, (20, 20), (20 + panel_w, 20 + panel_h), (90, 90, 90), 2)
@@ -168,7 +214,7 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
             # Panel Text
             cv2.putText(disp, "CUP HEIGHTS", (int(40*S), int(45*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.55 * S, (170, 170, 170), 3)
             cv2.putText(disp, f"Z_tray: {z_tray_live:.1f} cm", (int(230*S), int(40*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (255, 160, 60), 3)
-            
+
             base_y = int(95 * S)
             for i in range(2):
                 h_val = cup_heights_ema[i]
@@ -179,7 +225,7 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
                     cv2.putText(disp, f"{h_val:.1f} cm", (int(115*S), y_pos+int(5*S)), cv2.FONT_HERSHEY_DUPLEX, 1.3 * S, (0, 255, 100), 4)
                     z_rim_val = max(0.0, z_tray_live - h_val)
                     cv2.putText(disp, f"Z_rim: {z_rim_val:.1f} cm", (int(280*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (100, 255, 100), 2)
-                    
+
                     if i < len(cup_bboxes):
                         x1c, y1c, x2c, y2c = cup_bboxes[i]
                         bbox_w = x2c - x1c
@@ -275,7 +321,6 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
         print("\n[INFO] Execution stopped by user (Ctrl+C).")
     finally:
             if video_writer: video_writer.release()
-            cap.release()
             if not headless and not gui: cv2.destroyAllWindows()
 
             print("\n[DONE] Pipeline closed. Generating Final Report...")

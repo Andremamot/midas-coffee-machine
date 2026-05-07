@@ -311,9 +311,12 @@ class FusionGUI(Gtk.Window):
             a = float(self.entry_alpha.get_text())
             b = float(self.entry_beta.get_text())
             z = float(self.entry_zoom.get_text())
-            self.moil_undistorter.pitch = a
-            self.moil_undistorter.yaw = b
-            self.moil_undistorter.zoom = z
+            # KRITIS: Harus memanggil update_maps() agar Moildev benar-benar
+            # meregenerasi remap matrices. Sebelumnya hanya meng-set atribut Python
+            # tanpa regenerasi maps → zoom/alpha/beta tidak berpengaruh secara visual.
+            self.moil_undistorter.update_maps(pitch=a, yaw=b, zoom=z)
+            # Sinkronkan entry dengan nilai aktual (hybrid zoom mungkin mengubah display)
+            self.entry_zoom.set_text(str(round(self.moil_undistorter.zoom, 2)))
         except ValueError:
             pass
 
@@ -321,7 +324,9 @@ class FusionGUI(Gtk.Window):
         self.entry_alpha.set_text("0.0")
         self.entry_beta.set_text("0.0")
         self.entry_zoom.set_text("1.4")
-        self.on_apply_anypoint(None)
+        if self.moil_undistorter:
+            self.moil_undistorter.update_maps(pitch=0.0, yaw=0.0, roll=0.0, zoom=1.4)
+            self.entry_zoom.set_text(str(round(self.moil_undistorter.zoom, 2)))
 
     def on_start_calibration(self, widget):
         """Dipanggil saat user menekan tombol Start Calibration."""
