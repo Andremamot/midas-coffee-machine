@@ -462,6 +462,16 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
         # If headless, just wait for thread to finish
         thread.join()
 
+    # ── Cleanup yang benar untuk menghindari SIGABRT ──
+    # Beritahu background thread untuk berhenti membaca frame
+    _cam_alive[0] = False
+    if _cam_thread.is_alive():
+        _cam_thread.join(timeout=1.0)
+    
+    # Release hardware kamera setelah thread reader dipastikan mati
+    if cap and cap.isOpened():
+        cap.release()
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="ArUco + MiDaS Cup Height Estimator")
     ap.add_argument("--camera",       type=int,   default=0,     help="Index kamera (default: 0)")

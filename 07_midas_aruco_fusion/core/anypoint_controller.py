@@ -119,10 +119,10 @@ class AnypointController:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45 * S, color, 2, cv2.LINE_AA)
 
         if getattr(self._u, "mode", 2) == 1:
-            put("[ ANYPOINT (MODE 1) ]", 0, (0, 200, 255))
-            put(f"Alpha : {self._u.pitch:+.1f}deg  (drag up/dn)", 1)
-            put(f"Beta  : {self._u.yaw:+.1f}deg  (drag L/R)", 2)
-            put(f"Zoom  : {self._u.zoom:.2f}x  (scroll)", 3)
+            put("[ ANYPOINT (MODE 1 - POLAR) ]", 0, (0, 200, 255))
+            put(f"Alpha (Zenith) : {self._u.pitch:+.1f}deg", 1)
+            put(f"Beta  (Azimuth): {self._u.yaw:+.1f}deg", 2)
+            put(f"Zoom  (Radius) : {self._u.zoom:.2f}x", 3)
             put("R=reset  S=print params", 4, (100, 200, 100))
         else:
             put("[ ANYPOINT CTRL ]", 0, (0, 200, 255))

@@ -191,8 +191,9 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
                 x1c, y1c, x2c, y2c = bbox
                 cv2.rectangle(disp, (x1c, y1c), (x2c, y2c), (0, 255, 80), 5)
 
-            # UI Scaling factor (2.5x for 2.5K resolution)
-            S = 2.5
+            # UI Scaling factor (dinamis berdasarkan lebar frame)
+            # Baseline: frame 2592x1944 -> S ≈ 2.5
+            S = max(0.5, w_frame / 1000.0)
             panel_w, panel_h = int(520 * S), int(135 * S)
             cv2.rectangle(disp, (20, 20), (20 + panel_w, 20 + panel_h), (25, 25, 25), -1)
             cv2.rectangle(disp, (20, 20), (20 + panel_w, 20 + panel_h), (90, 90, 90), 2)
@@ -320,7 +321,6 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
         print("\n[INFO] Execution stopped by user (Ctrl+C).")
     finally:
             if video_writer: video_writer.release()
-            cap.release()
             if not headless and not gui: cv2.destroyAllWindows()
 
             print("\n[DONE] Pipeline closed. Generating Final Report...")
