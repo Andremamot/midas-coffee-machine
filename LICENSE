@@ -19,3 +19,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+nah di folder 07_  itu ada update pada versi python yang menambahkan support untuk kamera fisheye menggunakan moil, nah file moil itu ada di folder lib di dalam 07_... gunakan yang moildevren karna ini tujuannya untuk rz v2h aarch64,.  jadi dari update python aku ingin kamu mengupdate versi kode cpp yang ditujukan untuk rz v2h supaya juga bisa menggunakan fisheye,... .. gini tujuannya itu mengkonversi hasil update (support fisheye) dari python ke cpp dan aplikasikan hasil update 

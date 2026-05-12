@@ -111,3 +111,8 @@ venv.bak/
 
 /results/live_cam/
 *.mp4
+
+opencv_sync_tmp
+build-poky
+test-module-app
+.vscode
