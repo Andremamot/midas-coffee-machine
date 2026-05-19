@@ -116,3 +116,7 @@ opencv_sync_tmp
 build-poky
 test-module-app
 .vscode
+
+/Model_kakip
+/08_midas_aruco_fusion_cpp
+/07_midas_aruco_fusion/tests/
