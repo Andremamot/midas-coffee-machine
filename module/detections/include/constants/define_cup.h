@@ -37,9 +37,9 @@ namespace c {
 class yolov8 {
 public:
     /* Model Binary */
-    inline static const std::string model_dir = "model/cup/v2h/yolov8";
+    inline static const std::string model_dir = "model/cup/v2h/yolov8b";
     inline static const std::string pre_dir = model_dir + "/preprocess";
-    inline static const std::string label_list = "model/cup/v2h/yolov8/labels.txt";
+    inline static const std::string label_list = model_dir + "/labels.txt";
 
     inline static uint32_t DRPAI_MEM_OFFSET = 0x0000000;
 

@@ -37,6 +37,9 @@
 #include <filesystem>
 #include <linux/drpai.h>
 #include <opencv2/opencv.hpp>
+#include <signal.h>
+#include <execinfo.h>
+#include <unistd.h>
 
 #include <detections/ai.h>
 
@@ -54,6 +57,19 @@
 
 
 namespace fs = std::filesystem;
+
+/* ── SIGSEGV handler: print backtrace ───────────────────────────────────── */
+static void sigsegv_handler(int sig)
+{
+    void* array[32];
+    int size = backtrace(array, 32);
+    char msg[] = "\n[FATAL] Caught signal SIGSEGV — backtrace:\n";
+    write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    backtrace_symbols_fd(array, size, STDERR_FILENO);
+    char done[] = "[FATAL] End of backtrace. Exiting.\n";
+    write(STDERR_FILENO, done, sizeof(done) - 1);
+    _exit(1);
+}
 
 /* ── Simple argument parsing ─────────────────────────────────────────────── */
 struct Args {
@@ -193,6 +209,13 @@ int main(int argc, char* argv[])
     }
     OCA_Activate( &OCA_list[0] );
 
+    /* Install SIGSEGV handler for debugging */
+    struct sigaction sa;
+    sa.sa_handler = sigsegv_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGSEGV, &sa, nullptr);
+
     std::cout << "=======================================================\n";
     std::cout << "  ArUco + MiDaS + YOLOv8 | Cup Height Estimator (V2H)\n";
     std::cout << "=======================================================\n\n";
@@ -210,7 +233,23 @@ int main(int argc, char* argv[])
     std::cout << "[INIT] Initializing AI (DRP-AI cup detector + MiDaS)...\n";
     AI* ai = AI::get_instance();
     (void)ai;  /* triggers singleton constructor */
-    std::cout << "[INIT] AI initialized.\n\n";
+    std::cout << "[INIT] AI initialized.\n";
+
+    /* ── Warm up DRP-AI in main thread ──────────────────────────────────── */
+    /* DRPQueue is lazy-initialized on first detect() call.
+     * If detect() is first called from a secondary thread, the DRPQueue worker
+     * thread crashes because DRP-AI hardware context is not inherited.
+     * Solution: trigger the first detect() here in main() so the DRPQueue
+     * is fully initialized in the correct thread context before inference thread. */
+    std::cout << "[INIT] Warming up DRP-AI in main thread...\n";
+    {
+        cv::Mat dummy(64, 64, CV_8UC3, cv::Scalar(0, 0, 0));
+        try {
+            ai->cup_detector->detect(dummy);
+            ai->midas_estimator->inference(dummy);
+        } catch (...) { /* ignore dummy-frame errors */ }
+    }
+    std::cout << "[INIT] DRP-AI warm-up complete.\n\n";
 
     /* ── Initialize ArUco ─────────────────────────────────────────────── */
     std::cout << "[INIT] Loading ArucoDetector (calibration: "
@@ -220,8 +259,15 @@ int main(int argc, char* argv[])
 
     /* ── Open camera ──────────────────────────────────────────────────── */
     std::cout << "[INIT] Opening camera index " << args.camera << "...\n";
-    Camera cam(args.camera, /*autostart=*/true);
+    Camera cam(args.camera, /*autostart=*/true, /*manual_exposure=*/args.manual_exposure);
     std::cout << "[INIT] Camera ready (threaded capture).\n\n";
+
+    if (args.manual_exposure > 0) {
+        // Konversi dari nilai raw (1000-10000) ke skala Smart Exposure (1.0-10.0)
+        float smart_val = std::max(1.0f, std::min(10.0f, static_cast<float>(args.manual_exposure) / 1000.0f));
+        std::cout << "[CAM] Menggunakan Smart Exposure: " << smart_val << " (raw=" << args.manual_exposure << ")\n";
+        cam.set_smart_exposure(smart_val);
+    }
 
     /* ── Initialize Moildev fisheye undistorter (only if --fisheye) ──── */
     std::unique_ptr<MoilUndistorter>  moil_undistorter;
@@ -273,7 +319,7 @@ int main(int argc, char* argv[])
     std::shared_ptr<GuiFusion> gui;
     if (!args.headless) {
         gtk_init(&argc, &argv);
-        gui = std::make_shared<GuiFusion>(moil_undistorter.get(), args.headless, args.manual_exposure);
+        gui = std::make_shared<GuiFusion>(moil_undistorter.get(), args.headless, args.manual_exposure, &cam);
         std::cout << "[GUI] GTK3 Interface Active\n\n";
     }
 
@@ -366,11 +412,13 @@ int main(int argc, char* argv[])
         }
 
         /* ── Resolve active poly_Kgeom for type-5 ────────────────────────── */
+        std::cout << "[DEBUG] Resolving poly_Kgeom...\n";
         std::vector<double> active_poly_Kgeom = {1.0};
         std::string         active_cup_str    = "LEGACY (1 Profile)";
 
         if (calib_data.value("type", 0) == 5 && calib_data.contains("profiles")) {
             auto profiles = calib_data["profiles"];
+            std::cout << "[DEBUG] type=5, profiles size=" << profiles.size() << "\n";
             if (args.target_cup > 0.0) {
                 std::ostringstream key_ss;
                 key_ss << args.target_cup;
@@ -397,9 +445,16 @@ int main(int argc, char* argv[])
                 calib_data["poly_Kgeom"].get<std::vector<double>>();
         }
 
+        std::cout << "[DEBUG] poly_Kgeom resolved: [" << active_cup_str
+                  << "] size=" << active_poly_Kgeom.size() << "\n";
+
         if (gui) {
+            std::cout << "[DEBUG] Setting GUI status...\n";
             gui->set_status_calib("Mode: Live (" + active_cup_str + ")");
         }
+
+        std::cout << "[DEBUG] Entering run_live_pipeline...\n";
+        std::cout.flush();
 
         /* ── Run live pipeline ────────────────────────────────────────────── */
         run_live_pipeline(

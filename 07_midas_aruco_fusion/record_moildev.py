@@ -2,6 +2,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
 import cv2
+cv2.ocl.setUseOpenCL(False)  # Disable OpenCL for stability
 import os
 import sys
 import time
@@ -80,8 +81,9 @@ class MoildevRecordingWindow(Gtk.Window):
         params = (alpha, beta, zoom)
         if params != self.current_moil_params:
             map_x, map_y = self.moil.maps_anypoint_mode1(alpha, beta, zoom)
-            self.map_x = cv2.UMat(map_x.astype(np.float32))
-            self.map_y = cv2.UMat(map_y.astype(np.float32))
+            with self.lock:
+                self.map_x = cv2.UMat(map_x.astype(np.float32))
+                self.map_y = cv2.UMat(map_y.astype(np.float32))
             self.current_moil_params = params
 
     # ─── UI ──────────────────────────────────────────────────────────────────
@@ -339,9 +341,13 @@ class MoildevRecordingWindow(Gtk.Window):
                     if ret2 and frame2 is not None:
                         frame = frame2
 
-                if self.moil and self.map_x is not None and self.map_y is not None:
+                with self.lock:
+                    map_x_copy = self.map_x
+                    map_y_copy = self.map_y
+
+                if self.moil and map_x_copy is not None and map_y_copy is not None:
                     umat_frame   = cv2.UMat(frame)
-                    remapped_umat = cv2.remap(umat_frame, self.map_x, self.map_y,
+                    remapped_umat = cv2.remap(umat_frame, map_x_copy, map_y_copy,
                                               cv2.INTER_LINEAR,
                                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
                     remapped_frame = remapped_umat.get()
@@ -418,7 +424,7 @@ class MoildevRecordingWindow(Gtk.Window):
                 # Dapatkan resolusi frame
                 w, h = 2592, 1944 # default fallback
                 if self.map_x is not None:
-                    h, w = self.map_x.shape[:2]
+                    h, w = self.map_x.get().shape[:2]
                 elif self.cap and self.cap.isOpened():
                     w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))

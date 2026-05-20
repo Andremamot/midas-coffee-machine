@@ -8,10 +8,11 @@
 #include <mutex>
 
 class MoilUndistorter;
+class Camera;
 
 class GuiFusion {
 public:
-    GuiFusion(MoilUndistorter* moil_undistorter, bool headless, int initial_exposure);
+    GuiFusion(MoilUndistorter* moil_undistorter, bool headless, int initial_exposure, Camera* camera = nullptr);
     ~GuiFusion();
 
     void show_all();
@@ -26,24 +27,19 @@ public:
     void enter_setup_mode(const std::string& calib_name);
 
     bool is_normalize_enabled() const;
-<<<<<<< Updated upstream
-=======
     bool is_bw_enabled() const;
->>>>>>> Stashed changes
     bool is_alive() const { return alive_; }
     void wait_for_calibration_ready();
     bool is_calibration_ready() const;
 
 private:
     MoilUndistorter* moil_undistorter_;
+    Camera*          camera_;
     bool headless_;
     int initial_exposure_;
     bool alive_;
     bool normalize_enabled_;
-<<<<<<< Updated upstream
-=======
     bool bw_enabled_;
->>>>>>> Stashed changes
 
     GtkWidget* window_;
     GtkWidget* image_;
@@ -56,10 +52,7 @@ private:
     GtkWidget* btn_start_calib_;
     GtkWidget* btn_next_step_;
     GtkWidget* chk_normalize_;
-<<<<<<< Updated upstream
-=======
     GtkWidget* chk_bw_;
->>>>>>> Stashed changes
     GtkWidget* lbl_setup_hint_;
 
     std::queue<int> key_queue_;
@@ -89,10 +82,7 @@ private:
     static void on_start_calib_clicked(GtkWidget* widget, gpointer data);
     static void on_next_step_clicked(GtkWidget* widget, gpointer data);
     static void on_chk_normalize_toggled(GtkToggleButton* togglebutton, gpointer data);
-<<<<<<< Updated upstream
-=======
     static void on_chk_bw_toggled(GtkToggleButton* togglebutton, gpointer data);
->>>>>>> Stashed changes
     
     static void on_action_btn_clicked(GtkWidget* widget, gpointer data);
 

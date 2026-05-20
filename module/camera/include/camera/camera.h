@@ -50,7 +50,7 @@ public:
      * @param source Camera source (device index or stream URL/path).
      * @param autostart If true, disables auto-start on construction.
      */
-    Camera(std::variant<int, std::string> source, bool autostart);
+    Camera(std::variant<int, std::string> source, bool autostart, int manual_exposure = 0);
 
     /**
      * @brief Destroy the Camera and release all resources.
@@ -83,6 +83,15 @@ public:
      */
     cv::Mat get_frame();
 
+    /**
+     * @brief Set smart manual exposure value (1.0 to 10.0).
+     *
+     * Scales the value to raw exposure, gain, and brightness limits using v4l2-ctl.
+     *
+     * @param val Float value between 1.0 and 10.0
+     */
+    void set_smart_exposure(float val);
+
 private:
     /**
      * @brief Internal capture loop run by camera_thread.
@@ -112,4 +121,7 @@ private:
 
     /** @brief Configured camera source (device index or stream URL/path). */
     std::variant<int, std::string> camera_source;
+
+    /** @brief Manual exposure value (0 = auto). */
+    std::atomic<int> exposure_val_;
 };

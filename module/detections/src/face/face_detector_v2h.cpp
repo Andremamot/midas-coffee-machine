@@ -9,9 +9,6 @@ static inline long ms_between(const Clock::time_point& a, const Clock::time_poin
 FaceDetectorV2H::FaceDetectorV2H() {}
 
 FaceDetectorV2H::~FaceDetectorV2H() {
-    if (drpai_output_buf) {
-        delete[] drpai_output_buf;
-    }
 }
 
 double FaceDetectorV2H::sigmoid(double x) { return 1.0 / (1.0 + exp(-x)); }

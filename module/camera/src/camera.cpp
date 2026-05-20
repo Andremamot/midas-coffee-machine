@@ -1,10 +1,11 @@
 #include <camera/camera.h>
+#include <cstdlib>
 
 /* =========================
  * Constructor / Destructor
  * ========================= */
-Camera::Camera(std::variant<int, std::string> source, bool autostart)
-    : camera_source(source), running(false) {
+Camera::Camera(std::variant<int, std::string> source, bool autostart, int manual_exposure)
+    : camera_source(source), running(false), exposure_val_(manual_exposure) {
   if (autostart) {
     start_camera();
   }
@@ -44,6 +45,35 @@ void Camera::stop_camera() {
     frame.release();
     frame = cv::Mat();
   }
+}
+
+void Camera::set_smart_exposure(float val) {
+  if (val < 1.0f) val = 1.0f;
+  if (val > 10.0f) val = 10.0f;
+  
+  // Exposure time (Raw): 1000 -> 10000
+  int raw_exp = static_cast<int>(std::round(val * 1000.0f));
+  
+  // Gain (0 - 255): Scale linearly from val 1.0 to 10.0
+  int raw_gain = static_cast<int>(std::round((val - 1.0f) / 9.0f * 255.0f));
+  
+  // Brightness EV (-64 to +64): Scale linearly
+  int raw_bri = static_cast<int>(std::round((val - 1.0f) / 9.0f * 128.0f - 64.0f));
+
+  exposure_val_.store(raw_exp); // Simpan exposure raw jika dibutuhkan
+
+  int idx = 0;
+  if (std::holds_alternative<int>(camera_source)) {
+    idx = std::get<int>(camera_source);
+  }
+  
+  std::string cmd = "v4l2-ctl -d /dev/video" + std::to_string(idx) +
+                    " --set-ctrl=exposure_auto=1" +
+                    " --set-ctrl=exposure_absolute=" + std::to_string(raw_exp) +
+                    " --set-ctrl=gain=" + std::to_string(raw_gain) +
+                    " --set-ctrl=brightness=" + std::to_string(raw_bri) +
+                    " >/dev/null 2>&1";
+  std::system(cmd.c_str());
 }
 
 /* =========================

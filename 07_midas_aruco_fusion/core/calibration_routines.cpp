@@ -139,9 +139,9 @@ nlohmann::json CalibRoutines::run_calib_1p_2p(cv::VideoCapture& cap,
     std::vector<Detection> last_detections;
     std::vector<ArucoResult> last_aruco;
 
-    std::cout << std::string(55, 0x2501) << "\n";
+    std::cout << std::string(55, '-') << "\n";
     std::cout << "  CALIBRATION " << calibrate_mode << "-POINT\n";
-    std::cout << std::string(55, 0x2501) << "\n";
+    std::cout << std::string(55, '-') << "\n";
 
     if (!headless) cv::namedWindow(WIN, cv::WINDOW_NORMAL);
 

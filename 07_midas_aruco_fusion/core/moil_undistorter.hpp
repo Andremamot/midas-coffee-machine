@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
+#include <mutex>
 
 // Forward-declare the legacy Moildev class from libmoildevren.a
 // (tidak include moildev.hpp karena itu adalah versi baru yang tidak match library)
@@ -98,13 +99,6 @@ public:
     cv::Mat build_aruco_camera_matrix(int frame_width, int frame_height) const;
 
     // ── Parameter accessors ────────────────────────────────────────────────
-<<<<<<< Updated upstream
-    float pitch_deg()   const { return pitch_;  }
-    float yaw_deg()     const { return yaw_;    }
-    float roll_deg()    const { return roll_;   }
-    float zoom_factor() const { return zoom_;   }
-    int   mode()        const { return mode_;   }
-=======
     float pitch_deg()    const { return pitch_;        }
     float yaw_deg()      const { return yaw_;          }
     float roll_deg()     const { return roll_;         }
@@ -112,7 +106,6 @@ public:
     float moil_zoom()    const { return moil_zoom_;    }  ///< komponen zoom yg dikirim ke Moildev (≤ MAX_MOIL_ZOOM)
     float digital_zoom() const { return digital_zoom_; }  ///< komponen zoom digital (≥ 1.0)
     int   mode()         const { return mode_;         }
->>>>>>> Stashed changes
 
     float image_width()  const { return img_w_; }
     float image_height() const { return img_h_; }
@@ -157,17 +150,9 @@ private:
 
     // Zoom referensi untuk perhitungan focal length ArUco.
     // Secara empiris: fl = param5_ * zoom / zoom_ref_^2
-<<<<<<< Updated upstream
     // zoom_ref_ adalah zoom di mana formula fl=param5_/zoom kebetulan benar.
     // Untuk library libmoildevren.a dengan kamera syue_7730v1_6: zoom_ref ≈ 1.6
     // Dapat diubah via set_aruco_zoom_ref().
-    float zoom_ref_;
-
-    // Remap maps (float32, native sensor resolution)
-    cv::Mat map_x_, map_y_;
-
-    // Internal: re-generate maps from current params
-=======
     float zoom_ref_;
 
     // ── Hybrid Zoom ───────────────────────────────────────────────────────────
@@ -186,8 +171,8 @@ private:
 
     // Remap maps (float32)
     cv::Mat map_x_, map_y_;
+    mutable std::mutex maps_mutex_;  ///< protects map_x_, map_y_ from concurrent undistort()
 
     // Internal: re-generate maps dari params saat ini
->>>>>>> Stashed changes
     void rebuild_maps_();
 };

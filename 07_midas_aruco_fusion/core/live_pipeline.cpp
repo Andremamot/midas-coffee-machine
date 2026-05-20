@@ -81,12 +81,8 @@ static std::atomic<bool>       g_pipeline_running{true};
 
 void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::json calib_data,
                       double marker_size_cm, std::vector<double> active_poly_Kgeom, double focal_px,
-<<<<<<< Updated upstream
-                      MoilUndistorter* moil, bool no_anypoint, int output_w, int output_h)
-=======
                       MoilUndistorter* moil, bool no_anypoint, int output_w, int output_h,
                       GuiFusion* gui)
->>>>>>> Stashed changes
 {
     AI* ai = AI::get_instance();
     ArucoDetector& aruco = *aruco_ptr;
@@ -119,8 +115,6 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
             continue;
         }
 
-<<<<<<< Updated upstream
-=======
         /* ── Normalize Lighting (jika GUI aktif dan diaktifkan user) ───── */
         if (gui != nullptr && gui->is_normalize_enabled()) {
             /* CLAHE-based normalization: equalize luminance di YCrCb */
@@ -140,8 +134,6 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
             cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
             cv::cvtColor(gray, frame, cv::COLOR_GRAY2BGR);
         }
-
->>>>>>> Stashed changes
         /* ── Apply fisheye undistortion (if enabled) ──────────────────── */
         if (moil != nullptr && !no_anypoint) {
             frame = moil->undistort(frame);
@@ -150,12 +142,6 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
              * If zoom changes (mouse scroll), the equivalent focal length
              * also changes. Failing to update causes wrong distance readings. */
             cv::Mat new_K = moil->build_aruco_camera_matrix(frame.cols, frame.rows);
-<<<<<<< Updated upstream
-            aruco.camera_matrix = new_K;
-            // Setelah Moildev undistortion, gambar sudah rektifikasi
-            // dist_coeffs harus 0 agar ArUco pose estimation tidak double-compensate
-            aruco.dist_coeffs = cv::Mat::zeros(1, 5, CV_64F);
-=======
             if (aruco.camera_matrix.empty() || aruco.camera_matrix.size() != new_K.size()) {
                 aruco.camera_matrix = new_K.clone();
             } else {
@@ -166,9 +152,8 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
             if (aruco.dist_coeffs.empty() || aruco.dist_coeffs.cols != 5) {
                 aruco.dist_coeffs = cv::Mat::zeros(1, 5, CV_64F);
             } else {
-                cv::Mat::zeros(1, 5, CV_64F).copyTo(aruco.dist_coeffs);
+                aruco.dist_coeffs.setTo(0);
             }
->>>>>>> Stashed changes
         }
 
         double now = now_sec();
@@ -393,30 +378,34 @@ void run_live_pipeline(Camera*                 cam,
                        int                     output_h)
 {
     /* Read focal length from aruco camera matrix */
+    std::cout << "[DEBUG-PL] run_live_pipeline entered\n"; std::cout.flush();
+    std::cout << "[DEBUG-PL] aruco.camera_matrix empty=" << aruco.camera_matrix.empty() << "\n"; std::cout.flush();
     double focal_px = aruco.camera_matrix.empty() ? 800.0
                       : aruco.camera_matrix.at<double>(0, 0);
+    std::cout << "[DEBUG-PL] focal_px=" << focal_px << "\n"; std::cout.flush();
 
     int ctype = calib_data.value("type", 1);
+    std::cout << "[DEBUG-PL] ctype=" << ctype << "\n"; std::cout.flush();
 
     if (gui && !headless) {
         std::cout << "[GUI] Connected to GTK interface.\n";
     }
 
     /* Reset shared state */
+    std::cout << "[DEBUG-PL] Resetting shared state...\n"; std::cout.flush();
     {
         std::lock_guard<std::mutex> lock(g_result_mutex);
         g_shared_result = InferenceResult();
         g_pipeline_running = true;
     }
+    std::cout << "[DEBUG-PL] Shared state reset OK\n"; std::cout.flush();
 
     /* Start Inference Thread */
+    std::cout << "[DEBUG-PL] Starting inference thread...\n"; std::cout.flush();
     std::thread inf_thread(inference_worker, cam, &aruco, calib_data,
                            marker_size_cm, active_poly_Kgeom, focal_px,
-<<<<<<< Updated upstream
-                           moil, no_anypoint, output_w, output_h);
-=======
                            moil, no_anypoint, output_w, output_h, gui);
->>>>>>> Stashed changes
+    std::cout << "[DEBUG-PL] Inference thread started\n"; std::cout.flush();
 
     /* Recording state */
     bool              is_recording = false;
@@ -431,8 +420,6 @@ void run_live_pipeline(Camera*                 cam,
                 continue;
             }
 
-<<<<<<< Updated upstream
-=======
             /* ── Normalize Lighting untuk display frame ────────────────── */
             if (gui != nullptr && gui->is_normalize_enabled()) {
                 cv::Mat ycrcb;
@@ -451,8 +438,6 @@ void run_live_pipeline(Camera*                 cam,
                 cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
                 cv::cvtColor(gray, frame, cv::COLOR_GRAY2BGR);
             }
-
->>>>>>> Stashed changes
             /* ── Apply fisheye undistortion to display frame ── */
             if (moil != nullptr && !no_anypoint) {
                 frame = moil->undistort(frame);
@@ -474,8 +459,20 @@ void run_live_pipeline(Camera*                 cam,
             cv::Mat disp = frame.clone();
 
             /* ── Build display frame ── */
-            if (!res.aruco_results.empty())
-                disp = aruco.annotate_frame(disp, res.aruco_results);
+            /* NOTE: aruco object is owned by inference thread — do NOT call aruco.detect()
+             * or aruco.annotate_frame() here. Use the snapshot from g_shared_result instead.
+             * Annotate manually using the corners stored in aruco_results. */
+            for (const auto& ar : res.aruco_results) {
+                if (ar.corners.size() == 4) {
+                    std::vector<cv::Point> pts;
+                    for (const auto& c : ar.corners)
+                        pts.push_back(cv::Point((int)c.x, (int)c.y));
+                    cv::polylines(disp, pts, true, cv::Scalar(0, 255, 0), 2);
+                    cv::putText(disp, "ID:" + std::to_string(ar.id),
+                                pts[0], cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                                cv::Scalar(0, 220, 0), 1);
+                }
+            }
             if (res.aruco_roi_valid)
                 cv::rectangle(disp, res.aruco_roi, cv::Scalar(255, 140, 0), 1);
             for (auto& bbox : res.cup_bboxes)

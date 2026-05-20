@@ -118,16 +118,11 @@ MoilUndistorter::MoilUndistorter(const std::string& json_path,
                                  int frame_w, int frame_h,
                                  int output_w, int output_h)
     : moil_(nullptr)
-<<<<<<< Updated upstream
-    , pitch_(pitch), yaw_(yaw), roll_(roll), zoom_(zoom), mode_(mode)
-    , zoom_ref_(1.6f)  // Empiris: fl = param5_ * zoom / zoom_ref²
-=======
     , pitch_(pitch), yaw_(yaw), roll_(roll)
     , zoom_(std::max(1.0f, zoom))
     , mode_(mode)
     , zoom_ref_(1.6f)
     , moil_zoom_(0.0f), digital_zoom_(1.0f)
->>>>>>> Stashed changes
 {
     // ── 1. Read and validate JSON ────────────────────────────────────────────
     std::ifstream f(json_path);
@@ -258,12 +253,8 @@ MoilUndistorter::MoilUndistorter(const std::string& json_path,
 
     std::cout << "[MOIL] Init OK. Mode=" << mode_
               << "  pitch=" << pitch_ << "  yaw=" << yaw_
-<<<<<<< Updated upstream
-              << "  zoom=" << zoom_ << "\n"
-=======
               << "  zoom=" << zoom_
               << " [moil=" << moil_zoom_ << " + digital=" << digital_zoom_ << "x]\n"
->>>>>>> Stashed changes
               << "[MOIL] Remap maps ready (" << (int)output_w_ << "\xc3\x97" << (int)output_h_ << ")\n";
 }
 
@@ -295,21 +286,6 @@ void MoilUndistorter::rebuild_maps_()
 
     std::cout << "[MOIL-DEBUG] rebuild_maps calling ";
 
-<<<<<<< Updated upstream
-    if (mode_ == 1) {
-        std::cout << "AnyPointM(alpha=" << pitch_ << " beta=" << yaw_ << " zoom=" << zoom_ << ")\n";
-        moil_->AnyPointM(mx_ptr, my_ptr,
-                         static_cast<double>(pitch_),
-                         static_cast<double>(yaw_),
-                         static_cast<double>(zoom_));
-    } else {
-        // Mode 2: AnyPointM2 = rectilinear undistortion (pitch/yaw/zoom)
-        std::cout << "AnyPointM2(pitch=" << pitch_ << " yaw=" << yaw_ << " zoom=" << zoom_ << ")\n";
-        moil_->AnyPointM2(mx_ptr, my_ptr,
-                          static_cast<double>(pitch_),
-                          static_cast<double>(yaw_),
-                          static_cast<double>(zoom_));
-=======
     // ── Hybrid Zoom: kirim hanya moil_zoom ke Moildev ────────────────────────
     split_zoom_();
 
@@ -325,7 +301,6 @@ void MoilUndistorter::rebuild_maps_()
                           static_cast<double>(pitch_),
                           static_cast<double>(yaw_),
                           static_cast<double>(moil_zoom_));  // ← moil_zoom, bukan zoom_
->>>>>>> Stashed changes
     }
 
     // ── Scale maps ke resolusi frame input ───────────────────────────────────
@@ -353,8 +328,6 @@ void MoilUndistorter::rebuild_maps_()
     std::cout << "[MOIL-DEBUG] rebuild_maps finished.\n";
 }
 
-<<<<<<< Updated upstream
-=======
 // ── split_zoom_ ───────────────────────────────────────────────────────────────
 // Sama persis dengan Python: _split_zoom()
 //   moil_zoom  = min(total_zoom, MAX_MOIL_ZOOM)  → dikirim ke Moildev
@@ -394,8 +367,6 @@ cv::Mat MoilUndistorter::digital_crop_(const cv::Mat& frame) const
     cv::resize(cropped, result, cv::Size(w, h), 0, 0, cv::INTER_LINEAR);
     return result;
 }
-
->>>>>>> Stashed changes
 // ── update_maps ───────────────────────────────────────────────────────────────
 
 void MoilUndistorter::update_maps(float pitch, float yaw, float roll, float zoom)
@@ -403,12 +374,9 @@ void MoilUndistorter::update_maps(float pitch, float yaw, float roll, float zoom
     pitch_ = pitch;
     yaw_   = yaw;
     roll_  = roll;
-<<<<<<< Updated upstream
-    zoom_  = std::max(1.0f, std::min(20.0f, zoom));
-=======
     zoom_  = std::max(1.0f, zoom);  // clamp minimum 1.0
     // split_zoom_() dipanggil di dalam rebuild_maps_()
->>>>>>> Stashed changes
+    std::lock_guard<std::mutex> lock(maps_mutex_);
     rebuild_maps_();
 }
 
@@ -417,19 +385,20 @@ void MoilUndistorter::update_maps(float pitch, float yaw, float roll, float zoom
 cv::Mat MoilUndistorter::undistort(const cv::Mat& frame)
 {
     if (frame.empty()) return frame;
-    if (map_x_.empty() || map_y_.empty()) return frame;
 
-<<<<<<< Updated upstream
-    cv::Mat result;
-    cv::remap(frame, result, map_x_, map_y_,
-              cv::INTER_CUBIC,
-              cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
+    // Ambil snapshot maps di bawah lock agar thread-safe.
+    // Clone ringan: hanya increment ref count, tidak copy data.
+    cv::Mat mx, my;
+    {
+        std::lock_guard<std::mutex> lock(maps_mutex_);
+        if (map_x_.empty() || map_y_.empty()) return frame;
+        mx = map_x_;  // shared refcount, bukan deep copy
+        my = map_y_;
+    }
 
-    // ── Unsharp mask sharpening (if enabled) ─────────────────────────────────
-=======
     // Stage 1: Moildev remap (undistortion + zoom aman ≤ MAX_MOIL_ZOOM)
     cv::Mat result;
-    cv::remap(frame, result, map_x_, map_y_,
+    cv::remap(frame, result, mx, my,
               cv::INTER_LINEAR,          // INTER_CUBIC menyebabkan crash di OpenCL/transisi frame
               cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
 
@@ -437,7 +406,6 @@ cv::Mat MoilUndistorter::undistort(const cv::Mat& frame)
     result = digital_crop_(result);
 
     // Stage 3: Unsharp mask sharpening (if enabled)
->>>>>>> Stashed changes
     if (sharpen_amount_ > 0.0f) {
         cv::Mat blurred;
         cv::GaussianBlur(result, blurred, cv::Size(0, 0), 3.0);
@@ -462,31 +430,20 @@ float MoilUndistorter::adjusted_focal_length() const
 
 cv::Mat MoilUndistorter::build_aruco_camera_matrix(int frame_width, int frame_height) const
 {
-<<<<<<< Updated upstream
-    // Formula empiris yang cocok dengan data pengujian nyata:
-    //   fl = param5_ * zoom / zoom_ref_²
-    // 
-    // Di mana zoom_ref_ ≈ 1.6 adalah konstanta untuk libmoildevren.a.
-    // Derivasi:
-    //   - Pada zoom=1.6: fl=315px memberikan ArUco benar ~22cm
-    //   - Pada zoom=5.6: fl=1100px memberikan ArUco benar ~22cm
-    //   - 1100/315 = 3.5 = 5.6/1.6 → fl ∝ zoom
-    //   - fl = (param5_/zoom_ref_) * (zoom/zoom_ref_) = param5_ * zoom / zoom_ref_²
-    //
-    // Formula Python (adjusted_focal_length * scale * zoom) BERBEDA karena
-    // Python stream di 640x480 (scale≈0.25) sedangkan C++ di resolusi penuh (scale=1.0).
-=======
-    // fl ∝ zoom total (moil zoom + digital zoom keduanya meningkatkan focal length efektif)
-    // Formula: fl = param5_ * zoom_total / zoom_ref_²
-    // zoom_total = moil_zoom_ * digital_zoom_ = zoom_ (total zoom yang diminta user)
->>>>>>> Stashed changes
-    float fl = static_cast<float>(param5_) * zoom_ / (zoom_ref_ * zoom_ref_);
+    // Hitung skala rasio antara resolusi streaming dan resolusi sensor JSON
+    float scale_x = static_cast<float>(frame_width)  / std::max(1.0f, static_cast<float>(moil_->getImageWidth()));
+    float scale_y = static_cast<float>(frame_height) / std::max(1.0f, static_cast<float>(moil_->getImageHeight()));
+    float scale   = (scale_x + scale_y) / 2.0f;
+
+    // Focal length dikalikan dengan TOTAL zoom (moil + digital).
+    float fl = adjusted_focal_length() * scale * zoom_;
+    
     float cx = static_cast<float>(frame_width)  / 2.0f;
     float cy = static_cast<float>(frame_height) / 2.0f;
 
     cv::Mat K = (cv::Mat_<double>(3, 3) <<
-        fl, 0., cx,
-        0., fl, cy,
+        static_cast<double>(fl), 0., static_cast<double>(cx),
+        0., static_cast<double>(fl), static_cast<double>(cy),
         0., 0.,  1.);
 
     return K;
