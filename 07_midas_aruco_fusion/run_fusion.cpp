@@ -75,7 +75,7 @@ struct Args {
     float       moil_pitch        = 0.0f;
     float       moil_yaw          = 0.0f;
     float       moil_roll         = 0.0f;
-    float       moil_zoom         = 1.4f;
+    float       moil_zoom         = 1.0f;
     int         moil_mode         = 2;
     bool        no_anypoint       = false;
     int         manual_exposure   = 0;
@@ -105,7 +105,7 @@ static void print_usage(const char* prog)
         "  --moil-pitch <float>        Anypoint pitch in degrees  (default: 0.0)\n"
         "  --moil-yaw   <float>        Anypoint yaw in degrees    (default: 0.0)\n"
         "  --moil-roll  <float>        Anypoint roll in degrees   (default: 0.0)\n"
-        "  --moil-zoom  <float>        Anypoint zoom factor       (default: 1.4)\n"
+        "  --moil-zoom  <float>        Anypoint zoom factor       (default: 1.0)\n"
         "  --moil-mode  <int>          1=AnyPointM 2=AnyPointM2  (default: 2)\n"
         "  --no-anypoint               Fisheye ON but skip anypoint remap\n"
         "  --output-width  <int>       Upscale output to this width  (0=off)\n"

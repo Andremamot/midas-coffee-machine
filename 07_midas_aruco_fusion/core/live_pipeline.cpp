@@ -81,7 +81,12 @@ static std::atomic<bool>       g_pipeline_running{true};
 
 void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::json calib_data,
                       double marker_size_cm, std::vector<double> active_poly_Kgeom, double focal_px,
+<<<<<<< Updated upstream
                       MoilUndistorter* moil, bool no_anypoint, int output_w, int output_h)
+=======
+                      MoilUndistorter* moil, bool no_anypoint, int output_w, int output_h,
+                      GuiFusion* gui)
+>>>>>>> Stashed changes
 {
     AI* ai = AI::get_instance();
     ArucoDetector& aruco = *aruco_ptr;
@@ -114,6 +119,29 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
             continue;
         }
 
+<<<<<<< Updated upstream
+=======
+        /* ── Normalize Lighting (jika GUI aktif dan diaktifkan user) ───── */
+        if (gui != nullptr && gui->is_normalize_enabled()) {
+            /* CLAHE-based normalization: equalize luminance di YCrCb */
+            cv::Mat ycrcb;
+            cv::cvtColor(frame, ycrcb, cv::COLOR_BGR2YCrCb);
+            std::vector<cv::Mat> ch;
+            cv::split(ycrcb, ch);
+            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+            clahe->apply(ch[0], ch[0]);
+            cv::merge(ch, ycrcb);
+            cv::cvtColor(ycrcb, frame, cv::COLOR_YCrCb2BGR);
+        }
+
+        /* ── Black & White Mode (jika GUI aktif dan diaktifkan user) ───── */
+        if (gui != nullptr && gui->is_bw_enabled()) {
+            cv::Mat gray;
+            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+            cv::cvtColor(gray, frame, cv::COLOR_GRAY2BGR);
+        }
+
+>>>>>>> Stashed changes
         /* ── Apply fisheye undistortion (if enabled) ──────────────────── */
         if (moil != nullptr && !no_anypoint) {
             frame = moil->undistort(frame);
@@ -122,10 +150,25 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
              * If zoom changes (mouse scroll), the equivalent focal length
              * also changes. Failing to update causes wrong distance readings. */
             cv::Mat new_K = moil->build_aruco_camera_matrix(frame.cols, frame.rows);
+<<<<<<< Updated upstream
             aruco.camera_matrix = new_K;
             // Setelah Moildev undistortion, gambar sudah rektifikasi
             // dist_coeffs harus 0 agar ArUco pose estimation tidak double-compensate
             aruco.dist_coeffs = cv::Mat::zeros(1, 5, CV_64F);
+=======
+            if (aruco.camera_matrix.empty() || aruco.camera_matrix.size() != new_K.size()) {
+                aruco.camera_matrix = new_K.clone();
+            } else {
+                new_K.copyTo(aruco.camera_matrix);
+            }
+            // Setelah Moildev undistortion, gambar sudah rektifikasi
+            // dist_coeffs harus 0 agar ArUco pose estimation tidak double-compensate
+            if (aruco.dist_coeffs.empty() || aruco.dist_coeffs.cols != 5) {
+                aruco.dist_coeffs = cv::Mat::zeros(1, 5, CV_64F);
+            } else {
+                cv::Mat::zeros(1, 5, CV_64F).copyTo(aruco.dist_coeffs);
+            }
+>>>>>>> Stashed changes
         }
 
         double now = now_sec();
@@ -369,7 +412,11 @@ void run_live_pipeline(Camera*                 cam,
     /* Start Inference Thread */
     std::thread inf_thread(inference_worker, cam, &aruco, calib_data,
                            marker_size_cm, active_poly_Kgeom, focal_px,
+<<<<<<< Updated upstream
                            moil, no_anypoint, output_w, output_h);
+=======
+                           moil, no_anypoint, output_w, output_h, gui);
+>>>>>>> Stashed changes
 
     /* Recording state */
     bool              is_recording = false;
@@ -384,6 +431,28 @@ void run_live_pipeline(Camera*                 cam,
                 continue;
             }
 
+<<<<<<< Updated upstream
+=======
+            /* ── Normalize Lighting untuk display frame ────────────────── */
+            if (gui != nullptr && gui->is_normalize_enabled()) {
+                cv::Mat ycrcb;
+                cv::cvtColor(frame, ycrcb, cv::COLOR_BGR2YCrCb);
+                std::vector<cv::Mat> ch;
+                cv::split(ycrcb, ch);
+                cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+                clahe->apply(ch[0], ch[0]);
+                cv::merge(ch, ycrcb);
+                cv::cvtColor(ycrcb, frame, cv::COLOR_YCrCb2BGR);
+            }
+
+            /* ── Black & White Mode untuk display frame ────────────────── */
+            if (gui != nullptr && gui->is_bw_enabled()) {
+                cv::Mat gray;
+                cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+                cv::cvtColor(gray, frame, cv::COLOR_GRAY2BGR);
+            }
+
+>>>>>>> Stashed changes
             /* ── Apply fisheye undistortion to display frame ── */
             if (moil != nullptr && !no_anypoint) {
                 frame = moil->undistort(frame);

@@ -98,11 +98,21 @@ public:
     cv::Mat build_aruco_camera_matrix(int frame_width, int frame_height) const;
 
     // ── Parameter accessors ────────────────────────────────────────────────
+<<<<<<< Updated upstream
     float pitch_deg()   const { return pitch_;  }
     float yaw_deg()     const { return yaw_;    }
     float roll_deg()    const { return roll_;   }
     float zoom_factor() const { return zoom_;   }
     int   mode()        const { return mode_;   }
+=======
+    float pitch_deg()    const { return pitch_;        }
+    float yaw_deg()      const { return yaw_;          }
+    float roll_deg()     const { return roll_;         }
+    float zoom_factor()  const { return zoom_;         }
+    float moil_zoom()    const { return moil_zoom_;    }  ///< komponen zoom yg dikirim ke Moildev (≤ MAX_MOIL_ZOOM)
+    float digital_zoom() const { return digital_zoom_; }  ///< komponen zoom digital (≥ 1.0)
+    int   mode()         const { return mode_;         }
+>>>>>>> Stashed changes
 
     float image_width()  const { return img_w_; }
     float image_height() const { return img_h_; }
@@ -147,6 +157,7 @@ private:
 
     // Zoom referensi untuk perhitungan focal length ArUco.
     // Secara empiris: fl = param5_ * zoom / zoom_ref_^2
+<<<<<<< Updated upstream
     // zoom_ref_ adalah zoom di mana formula fl=param5_/zoom kebetulan benar.
     // Untuk library libmoildevren.a dengan kamera syue_7730v1_6: zoom_ref ≈ 1.6
     // Dapat diubah via set_aruco_zoom_ref().
@@ -156,5 +167,27 @@ private:
     cv::Mat map_x_, map_y_;
 
     // Internal: re-generate maps from current params
+=======
+    float zoom_ref_;
+
+    // ── Hybrid Zoom ───────────────────────────────────────────────────────────
+    // Batas zoom aman Moildev sebelum polynomial wrap-around.
+    // Sama persis dengan Python: MAX_MOIL_ZOOM = 1.5
+    static constexpr float MAX_MOIL_ZOOM = 1.5f;
+
+    float moil_zoom_;     ///< komponen zoom yang dikirim ke Moildev (≤ MAX_MOIL_ZOOM)
+    float digital_zoom_;  ///< komponen zoom tambahan via center-crop (≥ 1.0)
+
+    // Split zoom_ menjadi (moil_zoom_, digital_zoom_)
+    void split_zoom_();
+
+    // Terapkan center-crop + resize (digital zoom)
+    cv::Mat digital_crop_(const cv::Mat& frame) const;
+
+    // Remap maps (float32)
+    cv::Mat map_x_, map_y_;
+
+    // Internal: re-generate maps dari params saat ini
+>>>>>>> Stashed changes
     void rebuild_maps_();
 };

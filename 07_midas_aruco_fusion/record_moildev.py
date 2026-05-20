@@ -350,18 +350,15 @@ class MoildevRecordingWindow(Gtk.Window):
 
                 disp_frame = remapped_frame.copy()
 
-                if self.is_recording:
-                    if self.out_video is None:
-                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        output_path = os.path.join(SAVE_DIR, f"moildev_remap_{ts}.avi")
-                        fourcc = cv2.VideoWriter_fourcc(*'XVID')
-                        h, w = remapped_frame.shape[:2]
-                        self.out_video = cv2.VideoWriter(output_path, fourcc, int(self.fps), (w, h))
-                        self._last_video_path = output_path
-                        GLib.idle_add(self.lbl_status.set_text, f"Recording: {output_path}")
+                is_rec_ui = False
+                with self.lock:
+                    if self.is_recording and self.out_video is not None:
+                        # Ensure contiguous memory for FFmpeg backend safety
+                        self.out_video.write(np.ascontiguousarray(remapped_frame))
+                        self.recorded_frames_count += 1
+                        is_rec_ui = True
 
-                    self.out_video.write(remapped_frame)
-                    self.recorded_frames_count += 1
+                if is_rec_ui:
                     cv2.circle(disp_frame, (30, 30), 10, (0, 0, 255), -1)
                     cv2.putText(disp_frame, "REC", (50, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
@@ -416,23 +413,39 @@ class MoildevRecordingWindow(Gtk.Window):
         self.init_moildev()
 
     def on_toggle_record(self, widget):
-        if not self.is_recording:
-            self.is_recording = True
-            self.recorded_frames_count = 0
-            self._last_video_path = None
-            self.btn_record.set_label("⏹  Stop Recording")
-            print("[INFO] Recording started.")
-        else:
-            self.is_recording = False
-            self.btn_record.set_label("⏺  Start Recording")
-            if self.out_video:
-                self.out_video.release()
-                self.out_video = None
-            self.lbl_status.set_text("Recording Saved.")
-            print(f"\n[REPORT] Selesai merekam. Total frame: {self.recorded_frames_count}\n")
-            # Otomatis isi path ke kolom extract
-            if hasattr(self, '_last_video_path') and self._last_video_path:
-                self.entry_vid_path.set_text(self._last_video_path)
+        with self.lock:
+            if not self.is_recording:
+                # Dapatkan resolusi frame
+                w, h = 2592, 1944 # default fallback
+                if self.map_x is not None:
+                    h, w = self.map_x.shape[:2]
+                elif self.cap and self.cap.isOpened():
+                    w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_path = os.path.join(SAVE_DIR, f"moildev_remap_{ts}.avi")
+                # Gunakan MJPG karena lebih stabil dan minim konflik thread dengan GTK
+                fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+                self.out_video = cv2.VideoWriter(output_path, fourcc, int(self.fps), (w, h))
+                self._last_video_path = output_path
+                self.recorded_frames_count = 0
+                self.is_recording = True
+                
+                self.btn_record.set_label("⏹  Stop Recording")
+                self.lbl_status.set_text(f"Recording: {output_path}")
+                print("[INFO] Recording started.")
+            else:
+                self.is_recording = False
+                self.btn_record.set_label("⏺  Start Recording")
+                if self.out_video:
+                    self.out_video.release()
+                    self.out_video = None
+                self.lbl_status.set_text("Recording Saved.")
+                print(f"\n[REPORT] Selesai merekam. Total frame: {self.recorded_frames_count}\n")
+                # Otomatis isi path ke kolom extract
+                if hasattr(self, '_last_video_path') and self._last_video_path:
+                    self.entry_vid_path.set_text(self._last_video_path)
 
     def on_browse_video(self, widget):
         dialog = Gtk.FileChooserDialog(
