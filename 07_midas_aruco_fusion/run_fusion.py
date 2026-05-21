@@ -74,13 +74,38 @@ for d in [REPORT_DIR, VIDEO_DIR, SCREENSHOT_DIR]:
     os.makedirs(d, exist_ok=True)
 
 
+def load_aruco_calibration(args) -> float:
+    """
+    Mencoba memuat file kalibrasi ArUco (JSON) berdasarkan args.cup_profile
+    dan args.fisheye untuk mendapatkan focal_length_px.
+    """
+    if args.fisheye:
+        aruco_calib_name = f"calibration_aruco_fisheye_{args.cup_profile}.json"
+    else:
+        aruco_calib_name = f"calibration_aruco_{args.cup_profile}.json"
+    aruco_calib_path = os.path.join(_THIS_DIR, aruco_calib_name)
+
+    if os.path.exists(aruco_calib_path):
+        try:
+            with open(aruco_calib_path, "r") as f:
+                data = json.load(f)
+            fl = data.get("focal_length_px")
+            if fl is not None:
+                print(f"[ARUCO CALIB] ✅ Memuat focal length hasil kalibrasi: {fl:.1f} px (dari {aruco_calib_name})")
+                return float(fl)
+        except Exception as e:
+            print(f"[ARUCO CALIB] ⚠ Gagal membaca file kalibrasi ArUco: {e}")
+    return None
+
+
+
 # ╔═════════════════════════════════════════════════════════════════════════╗
 # ║  PIPELINE UTAMA                                                         ║
 # ╚═════════════════════════════════════════════════════════════════════════╝
 
 def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
                  marker_size: float, calibrate_mode: int, true_height: float, true_height_2: float,
-                 n_positions: int = 3, cap_width: int = 1280, cap_height: int = 720,
+                 n_positions: int = 3, cap_width: int = 2592, cap_height: int = 1944,
                  no_anypoint: bool = False):
     print("=" * 55)
     print("  🚀  ArUco + MiDaS + YOLO  |  Cup Height Estimator")
@@ -88,8 +113,17 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
 
     print("[INIT] Loading ArucoDetector...")
     aruco = ArucoDetector(marker_size_cm=marker_size)
+    # Coba muat focal length dari manual parameter atau JSON kalibrasi ArUco
+    focal_override = getattr(args, "focal_length", None)
+    if focal_override is None:
+        focal_override = load_aruco_calibration(args)
+    if focal_override is not None:
+        aruco.camera_matrix[0, 0] = focal_override
+        aruco.camera_matrix[1, 1] = focal_override
+        args.focal_length = focal_override
+        print(f"[ARUCO] focal length di-override: fx={focal_override:.1f}px")
     print("[INIT] Loading YoloDetector...")
-    yolo_weights = os.path.join(ROOT_DIR, "weights", "cup_detection_v3_12_s_best.pt")
+    yolo_weights = os.path.join(ROOT_DIR, "weights", "best.pt")
     yolo  = YoloDetector(weights_path=yolo_weights)
     print("[INIT] Loading MidasDepthEstimator (this may take a while)...")
     midas_weights = os.path.join(ROOT_DIR, "weights", "midas_v21_small_256.pt")
@@ -180,7 +214,7 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
             moil_pitch   = float(getattr(args, "moil_pitch",  0.0))
             moil_yaw     = float(getattr(args, "moil_yaw",    0.0))
             moil_roll    = float(getattr(args, "moil_roll",   0.0))
-            moil_zoom    = float(getattr(args, "moil_zoom",   1.4))
+            moil_zoom    = float(getattr(args, "moil_zoom",   2.0))
 
             h, w = tmp_frame.shape[:2]
             moil_undistorter = MoilUndistorter(
@@ -190,14 +224,18 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
                 yaw          = moil_yaw,
                 roll         = moil_roll,
                 zoom         = moil_zoom,
-                mode         = getattr(args, "moil_mode", 2),
-                use_opencl   = True,
+                mode         = getattr(args, "moil_mode", 0),
+                use_opencl   = False,   # OFF: thread-safety (sama seperti Kakip CPU-only)
                 frame_width  = w,
                 frame_height = h,
             )
 
             # Override camera matrix ArUco dengan focal length Moildev
             new_K = moil_undistorter.build_aruco_camera_matrix(w, h)
+            if getattr(args, "focal_length", None) is not None:
+                new_K[0, 0] = args.focal_length
+                new_K[1, 1] = args.focal_length
+                print(f"[ARUCO] focal length di-override manual: fx={args.focal_length:.1f}px")
             aruco.camera_matrix = new_K
             print(f"[MOIL] ArUco camera matrix overridden: "
                   f"fx={new_K[0,0]:.1f}, fy={new_K[1,1]:.1f}, "
@@ -496,14 +534,16 @@ if __name__ == "__main__":
                     help="Anypoint yaw dalam derajat (default: 0)")
     ap.add_argument("--moil-roll",         type=float, default=0.0,
                     help="Anypoint roll dalam derajat (default: 0)")
-    ap.add_argument("--moil-zoom",         type=float, default=1.4,
-                    help="Zoom factor anypoint Moildev (default: 1.4)")
-    ap.add_argument("--moil-mode",         type=int, default=2,
-                    help="Mode anypoint: 1 (Alpha/Beta) atau 2 (Pitch/Yaw/Roll) (default: 2)")
+    ap.add_argument("--moil-zoom",         type=float, default=2.0,
+                    help="Zoom factor anypoint Moildev (default: 2.0, sama dengan Kakip)")
+    ap.add_argument("--moil-mode",         type=int, default=0,
+                    help="Mode anypoint: 0 (mode1 Alpha/Beta), 1 (mode1), 2 (Pitch/Yaw/Roll) (default: 0)")
     ap.add_argument("--no-anypoint",       action="store_true",
                     help="Gunakan fisheye mode tapi TANPA remap anypoint (frame raw fisheye)")
     ap.add_argument("--manual-exposure",   type=int,   default=0,
                     help="Setel nilai manual exposure kamera (misal: 156). Default=0 (Auto-brightness)")
+    ap.add_argument("--focal-length",      type=float, default=None,
+                    help="Manual override focal length ArUco (px) untuk kalibrasi jarak presisi.")
 
     args = ap.parse_args()
 

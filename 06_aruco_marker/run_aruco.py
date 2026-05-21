@@ -6,10 +6,26 @@ run_aruco.py — CLI Entry Point untuk ArUco Marker Detection Experiment
   --camera [INDEX]      → live webcam dengan overlay real-time
   --generate-marker     → generate gambar marker untuk di-print
 
+Mode Fisheye (Moildev):
+  --fisheye             → aktifkan undistortion lensa fisheye via Moildev
+  --moil-camera-name    → profil kamera di camera_parameters.json
+  --moil-zoom           → faktor zoom hybrid (default 2.0)
+  --moil-mode           → mode Moildev: 0/1=Alpha/Beta, 2=Pitch/Yaw
+  --moil-pitch, --moil-yaw → arah pandang kamera (derajat)
+
 Contoh:
   python run_aruco.py --generate-marker
   python run_aruco.py --image foto_marker.jpg --marker-size 5.0
   python run_aruco.py --camera 0 --marker-size 5.0 --lock-focus
+
+  # Fisheye (kamera syue_7730v1_6, resolusi 2592x1944):
+  python run_aruco.py --camera 0 --marker-size 2.5 --fisheye \\
+      --moil-camera-name syue_7730v1_6 --moil-zoom 2.0 --moil-mode 0
+
+Kalibrasi focal length untuk ArUco fisheye:
+  Saat --fisheye aktif, focal length ArUco secara otomatis di-override
+  menggunakan adjusted focal length dari Moildev (parameter5 * calibRatio).
+  Jika hasil jarak tidak akurat, sesuaikan --moil-zoom dan ukur ulang.
 """
 
 import argparse
@@ -31,6 +47,17 @@ if _ROOT_DIR not in sys.path:
 
 from aruco_detector import ArucoDetector
 
+# ── Import Moildev (opsional, hanya jika --fisheye) ────────────────────────
+_FUSION_DIR = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "07_midas_aruco_fusion"))
+if _FUSION_DIR not in sys.path:
+    sys.path.insert(0, _FUSION_DIR)
+
+try:
+    from core.moil_undistorter import MoilUndistorter
+    _HAS_MOIL = True
+except ImportError:
+    _HAS_MOIL = False
+
 
 def _print_result(results, source=""):
     """Print hasil deteksi dalam format JSON."""
@@ -51,12 +78,17 @@ def _print_result(results, source=""):
 
 
 # ── Mode: Single Image ─────────────────────────────────────────────────
-def process_single_image(detector, image_path, output_dir):
+def process_single_image(detector, image_path, output_dir, moil_undistorter=None):
     """Proses satu gambar dan simpan hasil."""
     img = cv2.imread(image_path)
     if img is None:
         print(f"Error: Tidak bisa membaca gambar: {image_path}")
         return
+
+    # Fisheye undistortion jika aktif
+    if moil_undistorter is not None:
+        img = moil_undistorter.undistort(img)
+        print(f"[MOIL] Undistortion applied (zoom={moil_undistorter.zoom:.1f}x)")
 
     print(f"Memproses: {image_path}")
     results = detector.detect(img)
@@ -70,7 +102,8 @@ def process_single_image(detector, image_path, output_dir):
 
 
 # ── Mode: Live Camera ───────────────────────────────────────────────────
-def run_live_camera(detector, camera_index=0, lock_focus=False, focus_value=0):
+def run_live_camera(detector, camera_index=0, lock_focus=False, focus_value=0,
+                    moil_undistorter=None, cap_width=640, cap_height=480):
     """Live camera mode dengan overlay real-time."""
 
     SCREENSHOT_DIR = os.path.join(_SCRIPT_DIR, "results", "live_cam")
@@ -82,11 +115,13 @@ def run_live_camera(detector, camera_index=0, lock_focus=False, focus_value=0):
         print(f"Error: Tidak bisa membuka kamera index {camera_index}")
         return
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, cap_width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cap_height)
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"[CAMERA] Resolusi: {actual_w}x{actual_h}")
+    if moil_undistorter is not None:
+        print(f"[MOIL] Fisheye undistortion AKTIF — zoom={moil_undistorter.zoom:.1f}x")
 
     if lock_focus:
         cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
@@ -142,7 +177,10 @@ def run_live_camera(detector, camera_index=0, lock_focus=False, focus_value=0):
             print("Error: Failed to read frame from camera")
             break
 
-        if frame.shape[1] > 640:
+        # ── Fisheye Undistortion (jika Moil aktif) ────────────────────────
+        if moil_undistorter is not None:
+            frame = moil_undistorter.undistort(frame)
+        elif frame.shape[1] > 640:
             frame = cv2.resize(frame, (640, 480))
 
         t_start = time.time()
@@ -293,17 +331,25 @@ def run_live_camera(detector, camera_index=0, lock_focus=False, focus_value=0):
     cv2.destroyAllWindows()
 
     print("\n" + "="*50)
-    gt_input = input("Enter ground truth distance in cm [Press Enter to skip]: ").strip()
-    ground_truth = None
-    if gt_input:
-        try:
-            ground_truth = float(gt_input.replace(',', '.'))
-        except ValueError:
-            print("⚠ Invalid input, ignoring ground truth.")
+    try:
+        gt_input = input("Enter ground truth distance in cm [Press Enter to skip]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        gt_input = ""
 
     # Calculate final stats
     avg_d = stats_d_sum / stats_detected if stats_detected > 0 else 0.0
     
+    import re
+    # Clean up non-numeric characters (e.g. arrow key escape sequences like ^[[A)
+    gt_input_clean = re.sub(r"[^\d.,-]", "", gt_input)
+    ground_truth = None
+    if gt_input_clean:
+        try:
+            ground_truth = float(gt_input_clean.replace(',', '.'))
+        except ValueError:
+            print(f"⚠ Invalid input ('{gt_input}'), ignoring ground truth.")
+
+
     # Generate report data
     report_stats = {
         "total_frames": stats_total,
@@ -343,6 +389,8 @@ def run_live_camera(detector, camera_index=0, lock_focus=False, focus_value=0):
 
 def _generate_markdown_report(stats, distances, frames, screenshots):
     """Generate Markdown report with matplotlib chart."""
+    import matplotlib
+    matplotlib.use('Agg')  # Bypass GTK/Wayland GUI rendering
     import matplotlib.pyplot as plt
     import shutil
 
@@ -538,6 +586,137 @@ def _generate_json_report(report_dir, timestamp_folder, stats, distances, frames
 
 
 
+# ── Helper: Kalibrasi Focal Length Empiris ─────────────────────────────────
+def _run_focal_calibration(detector, args, moil_undistorter):
+    """
+    Mode kalibrasi focal length.
+
+    Cara pakai:
+      1. Taruh marker ArUco di jarak TEPAT (ukur dengan penggaris)
+      2. Jalankan dengan --calibrate-focal <jarak_cm>
+      3. Program membuka kamera, deteksi marker, lalu hitung fx yang benar
+      4. Salin nilai fx yang dicetak → pakai --focal-length di sesi berikutnya
+    """
+    import numpy as np
+
+    true_dist_cm = args.calibrate_focal
+    print(f"\n{'='*55}")
+    print(f"  🎯  MODE KALIBRASI FOCAL LENGTH")
+    print(f"  Jarak referensi: {true_dist_cm} cm")
+    print(f"  Pastikan marker ArUco {args.marker_size} cm ada di jarak TEPAT {true_dist_cm} cm")
+    print(f"  Tekan SPACE untuk capture, Q untuk keluar")
+    print(f"{'='*55}\n")
+
+    cap = cv2.VideoCapture(args.camera)
+    if not cap.isOpened():
+        print("Error: Tidak bisa membuka kamera")
+        return
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  args.cap_width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.cap_height)
+
+    fx_samples = []
+    current_fx = detector.camera_matrix[0, 0]
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if moil_undistorter is not None:
+            frame = moil_undistorter.undistort(frame)
+
+        results = detector.detect(frame)
+        annotated = detector.annotate_frame(frame, results)
+
+        # Overlay info
+        h, w = annotated.shape[:2]
+        overlay = annotated.copy()
+        cv2.rectangle(overlay, (0, 0), (w, 60), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.7, annotated, 0.3, 0, annotated)
+
+        if results:
+            best = detector.get_best_distance(results)
+            if best:
+                measured = best["distance_cm"]
+                # Hitung fx yang seharusnya: fx_benar = fx × (true / measured)
+                fx_correct = current_fx * (true_dist_cm / measured)
+                info = (f"Measured={measured:.1f}cm  "
+                        f"True={true_dist_cm:.1f}cm  "
+                        f"fx_benar={fx_correct:.1f}px  "
+                        f"[SPACE] simpan")
+                cv2.putText(annotated, info, (10, 35),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 120), 2)
+        else:
+            cv2.putText(annotated, "Marker tidak terdeteksi — arahkan ke marker",
+                        (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 255), 2)
+
+        n_samples = len(fx_samples)
+        cv2.putText(annotated, f"Samples: {n_samples}  [Q] selesai",
+                    (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+
+        cv2.imshow("Kalibrasi Focal Length", annotated)
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord(' ') and results:
+            best = detector.get_best_distance(results)
+            if best:
+                measured = best["distance_cm"]
+                fx_correct = current_fx * (true_dist_cm / measured)
+                fx_samples.append(fx_correct)
+                print(f"  [Sample {len(fx_samples)}] measured={measured:.2f}cm → fx_benar={fx_correct:.1f}px")
+        elif key == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+    if fx_samples:
+        fx_median = float(np.median(fx_samples))
+        print(f"\n{'='*55}")
+        print(f"  ✅  HASIL KALIBRASI FOCAL LENGTH")
+        print(f"  Samples   : {len(fx_samples)}")
+        print(f"  fx median : {fx_median:.1f} px")
+        print(f"\n  Gunakan perintah ini di sesi berikutnya:")
+        base_cmd = (
+            f"python run_aruco.py --camera {args.camera} "
+            f"--marker-size {args.marker_size}"
+        )
+        if args.fisheye:
+            base_cmd += (
+                f" --fisheye --moil-camera-name {args.moil_camera_name} "
+                f"--moil-zoom {args.moil_zoom} --moil-mode {args.moil_mode} "
+                f"--cap-width {args.cap_width} --cap-height {args.cap_height}"
+            )
+        base_cmd += f" --focal-length {fx_median:.1f}"
+        print(f"\n  {base_cmd}")
+        print(f"{'='*55}\n")
+        # Simpan hasil kalibrasi ke file JSON agar bisa di-load otomatis oleh 07_midas_aruco_fusion
+        import json
+        from datetime import datetime
+        if args.fisheye:
+            aruco_calib_name = f"calibration_aruco_fisheye_{args.cup_profile}.json"
+        else:
+            aruco_calib_name = f"calibration_aruco_{args.cup_profile}.json"
+        aruco_calib_path = os.path.join(_FUSION_DIR, aruco_calib_name)
+
+        calib_data = {
+            "type": "aruco_calibration",
+            "focal_length_px": fx_median,
+            "camera_name": args.moil_camera_name if args.fisheye else "standard",
+            "zoom": args.moil_zoom if args.fisheye else 1.0,
+            "mode": args.moil_mode if args.fisheye else 0,
+            "calibrated_at": datetime.now().isoformat()
+        }
+        try:
+            with open(aruco_calib_path, "w") as f:
+                json.dump(calib_data, f, indent=2)
+            print(f"[CALIB] 💾 Tersimpan file kalibrasi ArUco → {aruco_calib_path}")
+        except Exception as e:
+            print(f"[ERROR] Gagal menyimpan kalibrasi ArUco: {e}")
+    else:
+        print("Tidak ada sample yang diambil.")
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════
@@ -584,6 +763,10 @@ Contoh penggunaan:
                         help="Lock camera focus (matikan auto-focus)")
     parser.add_argument("--focus-value", type=int, default=0,
                         help="Nilai fokus tetap saat --lock-focus aktif (default: 0)")
+    parser.add_argument("--cap-width", type=int, default=640,
+                        help="Lebar resolusi capture USB (default: 640; pakai 2592 untuk fisheye 5MP)")
+    parser.add_argument("--cap-height", type=int, default=480,
+                        help="Tinggi resolusi capture USB (default: 480; pakai 1944 untuk fisheye 5MP)")
 
     # Calibration
     parser.add_argument("--params", type=str, default=None,
@@ -592,6 +775,31 @@ Contoh penggunaan:
     # Output
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Direktori output untuk visualisasi")
+
+    # ── Fisheye / Moildev options ─────────────────────────────────────────
+    parser.add_argument("--fisheye", action="store_true",
+                        help="Aktifkan undistortion lensa fisheye via Moildev")
+    parser.add_argument("--moil-camera-name", type=str, default="syue_7730v1_6",
+                        help="Nama profil kamera di camera_parameters.json (default: syue_7730v1_6)")
+    parser.add_argument("--moil-zoom", type=float, default=2.0,
+                        help="Faktor zoom hybrid Moildev (default: 2.0)")
+    parser.add_argument("--moil-mode", type=int, default=0,
+                        help="Mode Moildev: 0/1=Alpha/Beta (default), 2=Pitch/Yaw")
+    parser.add_argument("--moil-pitch", type=float, default=0.0,
+                        help="Pitch/Alpha arah pandang dalam derajat (default: 0.0)")
+    parser.add_argument("--moil-yaw", type=float, default=0.0,
+                        help="Yaw/Beta arah pandang dalam derajat (default: 0.0)")
+    parser.add_argument("--moil-params-json", type=str, default=None,
+                        help="Path ke camera_parameters.json Moildev (default: auto-detect)")
+    parser.add_argument("--focal-length", type=float, default=None,
+                        help="Override focal length ArUco secara manual (px). "
+                             "Gunakan ini setelah kalibrasi empiris. "
+                             "Jika tidak diset, diambil dari Moildev adjusted focal length.")
+    parser.add_argument("--calibrate-focal", type=float, default=None, metavar="TRUE_DIST_CM",
+                        help="Mode kalibrasi focal length: masukkan jarak sebenarnya (cm) ke marker. "
+                             "Program akan menghitung fx yang tepat lalu mencetak hasilnya untuk disimpan.")
+    parser.add_argument("--cup-profile", type=str, default="default",
+                        help="Nama profil gelas (misal: short, tall) untuk membedakan file kalibrasi.")
 
     args = parser.parse_args()
 
@@ -617,12 +825,82 @@ Contoh penggunaan:
     )
     print("Detector siap.\n")
 
+    # ── Inisialisasi Moildev (jika --fisheye) ────────────────────────────
+    moil_undistorter = None
+    if args.fisheye:
+        if not _HAS_MOIL:
+            print("[ERROR] --fisheye diberikan tapi MoilUndistorter tidak bisa diimport.")
+            print("        Pastikan conda env midas-py310 aktif dan folder moildev/ ada.")
+            sys.exit(1)
+
+        # Auto-detect path camera_parameters.json
+        if args.moil_params_json:
+            cam_json = args.moil_params_json
+        else:
+            cam_json = os.path.join(_FUSION_DIR, "camera_parameters.json")
+        if not os.path.isfile(cam_json):
+            print(f"[ERROR] camera_parameters.json tidak ditemukan: {cam_json}")
+            sys.exit(1)
+
+        cap_w = args.cap_width
+        cap_h = args.cap_height
+
+        print(f"[MOIL] Inisialisasi MoilUndistorter...")
+        print(f"[MOIL]   Camera : {args.moil_camera_name}")
+        print(f"[MOIL]   Zoom   : {args.moil_zoom}x  Mode: {args.moil_mode}")
+        print(f"[MOIL]   Pitch  : {args.moil_pitch}°  Yaw: {args.moil_yaw}°")
+        print(f"[MOIL]   Stream : {cap_w}x{cap_h}")
+        try:
+            import numpy as np  # pastikan np tersedia di scope ini
+            moil_undistorter = MoilUndistorter(
+                json_path      = cam_json,
+                camera_name    = args.moil_camera_name,
+                pitch          = args.moil_pitch,
+                yaw            = args.moil_yaw,
+                zoom           = args.moil_zoom,
+                mode           = args.moil_mode,
+                use_opencl     = False,  # CPU-safe untuk portabilitas
+                frame_width    = cap_w,
+                frame_height   = cap_h,
+            )
+            # Override camera matrix ArUco dengan focal length hasil Moildev yang sudah memperhitungkan zoom dan resolusi
+            detector.camera_matrix = moil_undistorter.build_aruco_camera_matrix(cap_w, cap_h)
+            if args.focal_length is not None:
+                detector.camera_matrix[0, 0] = args.focal_length
+                detector.camera_matrix[1, 1] = args.focal_length
+                print(f"[ARUCO] focal length di-override manual: fx={args.focal_length:.1f}px")
+            detector.dist_coeffs = np.zeros(5, dtype=np.float64)  # sudah undistorted
+            adj_f = detector.camera_matrix[0, 0]
+            cx = detector.camera_matrix[0, 2]
+            cy = detector.camera_matrix[1, 2]
+            print(f"[MOIL] ✅ ArUco camera matrix di-override: fx={adj_f:.1f}px, cx={cx:.0f}, cy={cy:.0f}")
+        except Exception as e:
+            print(f"[ERROR] Gagal inisialisasi MoilUndistorter: {e}")
+            sys.exit(1)
+    elif args.focal_length is not None:
+        # Fisheye tidak aktif, tapi user ingin override focal length biasa
+        import numpy as np
+        K = detector.camera_matrix.copy()
+        K[0, 0] = args.focal_length
+        K[1, 1] = args.focal_length
+        detector.camera_matrix = K
+        print(f"[ARUCO] focal length di-override manual: fx={args.focal_length:.1f}px")
+
+    # ── Mode Kalibrasi Focal Length ────────────────────────────────────────
+    if args.calibrate_focal is not None:
+        _run_focal_calibration(detector, args, moil_undistorter)
+        return
+
     if args.image:
-        process_single_image(detector, args.image, output_dir)
+        process_single_image(detector, args.image, output_dir,
+                             moil_undistorter=moil_undistorter)
     elif args.camera is not None:
         run_live_camera(detector, camera_index=args.camera,
                         lock_focus=args.lock_focus,
-                        focus_value=args.focus_value)
+                        focus_value=args.focus_value,
+                        moil_undistorter=moil_undistorter,
+                        cap_width=args.cap_width,
+                        cap_height=args.cap_height)
 
 
 if __name__ == "__main__":

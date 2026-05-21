@@ -163,7 +163,8 @@ class MoilUndistorter:
               f"→ stream: {frame_width}x{frame_height}")
 
         # Generate maps dengan moil_zoom (komponen aman, ≤ MAX_MOIL_ZOOM)
-        if self.mode == 1:
+        # mode 0 atau 1 → maps_anypoint_mode1 (Alpha/Beta), sama seperti C++ --moil-mode 0
+        if self.mode in (0, 1):
             # pitch dipetakan ke alpha, yaw dipetakan ke beta untuk Mode 1
             map_x_np, map_y_np = self._moil.maps_anypoint_mode1(pitch, yaw, self.moil_zoom)
         else:
@@ -319,8 +320,8 @@ class MoilUndistorter:
 
         cropped = frame[y1:y2, x1:x2]
 
-        # Resize kembali ke ukuran asli
-        return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+        # Resize kembali ke ukuran asli dengan LANCZOS4 untuk anti-aliasing halus
+        return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LANCZOS4)
 
     # ── Method Utama ────────────────────────────────────────────────────────
 
@@ -350,7 +351,8 @@ class MoilUndistorter:
         self.moil_zoom, self.digital_zoom = self._split_zoom(self.zoom)
 
         # Generate maps dengan moil_zoom saja (komponen aman)
-        if self.mode == 1:
+        # mode 0 atau 1 → maps_anypoint_mode1, sama seperti C++ --moil-mode 0
+        if self.mode in (0, 1):
             map_x_np, map_y_np = self._moil.maps_anypoint_mode1(
                 self.pitch, self.yaw, self.moil_zoom
             )
@@ -418,7 +420,7 @@ class MoilUndistorter:
             frame_in,
             mx,
             my,
-            interpolation=cv2.INTER_LINEAR,
+            interpolation=cv2.INTER_LANCZOS4,   # LANCZOS4: anti-aliasing terbaik
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         )
@@ -431,7 +433,7 @@ class MoilUndistorter:
 
         # Resize jika target_size dispesifikasi
         if self.target_size is not None:
-            remapped = cv2.resize(remapped, self.target_size, interpolation=cv2.INTER_LINEAR)
+            remapped = cv2.resize(remapped, self.target_size, interpolation=cv2.INTER_LANCZOS4)
 
         return remapped
 

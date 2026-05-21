@@ -289,18 +289,39 @@ void MoilUndistorter::rebuild_maps_()
     // ── Hybrid Zoom: kirim hanya moil_zoom ke Moildev ────────────────────────
     split_zoom_();
 
-    if (mode_ == 1) {
-        std::cout << "AnyPointM(alpha=" << pitch_ << " beta=" << yaw_ << " zoom=" << moil_zoom_ << ")\n";
+    if (mode_ == 1 || mode_ == 0) {
+        double alpha = pitch_;
+        double beta = yaw_;
+        if (beta < 0) {
+            beta = beta + 360;
+        }
+        if (alpha < -110 || alpha > 110 || beta < 0 || beta > 360) {
+            alpha = 0;
+            beta = 0;
+        } else {
+            alpha = (alpha < -110) ? -110 : ((alpha > 110) ? 110 : alpha);
+            beta = (beta < 0) ? 0 : ((beta > 360) ? 360 : beta);
+        }
+        std::cout << "AnyPointM(alpha=" << alpha << " beta=" << beta << " zoom=" << moil_zoom_ << ")\n";
         moil_->AnyPointM(mx_ptr, my_ptr,
-                         static_cast<double>(pitch_),
-                         static_cast<double>(yaw_),
-                         static_cast<double>(moil_zoom_));  // ← moil_zoom, bukan zoom_
+                         alpha,
+                         beta,
+                         static_cast<double>(moil_zoom_));
     } else {
-        std::cout << "AnyPointM2(pitch=" << pitch_ << " yaw=" << yaw_ << " zoom=" << moil_zoom_ << ")\n";
+        double p_val = pitch_;
+        double y_val = yaw_;
+        if (p_val < -110 || p_val > 110 || y_val < -110 || y_val > 110) {
+            p_val = 0;
+            y_val = 0;
+        } else {
+            p_val = (p_val < -110) ? -110 : ((p_val > 110) ? 110 : p_val);
+            y_val = (y_val < -110) ? -110 : ((y_val > 110) ? 110 : y_val);
+        }
+        std::cout << "AnyPointM2(pitch=" << p_val << " yaw=" << y_val << " zoom=" << moil_zoom_ << ")\n";
         moil_->AnyPointM2(mx_ptr, my_ptr,
-                          static_cast<double>(pitch_),
-                          static_cast<double>(yaw_),
-                          static_cast<double>(moil_zoom_));  // ← moil_zoom, bukan zoom_
+                          p_val,
+                          y_val,
+                          static_cast<double>(moil_zoom_));
     }
 
     // ── Scale maps ke resolusi frame input ───────────────────────────────────
@@ -364,7 +385,8 @@ cv::Mat MoilUndistorter::digital_crop_(const cv::Mat& frame) const
     cv::Mat cropped = frame(cv::Rect(x1, y1, crop_w, crop_h));
 
     cv::Mat result;
-    cv::resize(cropped, result, cv::Size(w, h), 0, 0, cv::INTER_LINEAR);
+    // LANCZOS4: anti-aliasing terbaik, mengurangi jagged/pixelated edges
+    cv::resize(cropped, result, cv::Size(w, h), 0, 0, cv::INTER_LANCZOS4);
     return result;
 }
 // ── update_maps ───────────────────────────────────────────────────────────────
@@ -399,7 +421,7 @@ cv::Mat MoilUndistorter::undistort(const cv::Mat& frame)
     // Stage 1: Moildev remap (undistortion + zoom aman ≤ MAX_MOIL_ZOOM)
     cv::Mat result;
     cv::remap(frame, result, mx, my,
-              cv::INTER_LINEAR,          // INTER_CUBIC menyebabkan crash di OpenCL/transisi frame
+              cv::INTER_LANCZOS4,        // Anti-aliasing terbaik untuk remap fisheye
               cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0));
 
     // Stage 2: Digital zoom via center-crop + resize (sisa zoom di atas moil_zoom)

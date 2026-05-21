@@ -1,0 +1,8 @@
+{
+  "type": "aruco_calibration",
+  "focal_length_px": 1064.8660626024334,
+  "camera_name": "syue_7730v1_6",
+  "zoom": 2.0,
+  "mode": 0,
+  "calibrated_at": "2026-05-21T14:54:29.023826"
+}

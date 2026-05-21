@@ -121,3 +121,4 @@ test-module-app
 /08_midas_aruco_fusion_cpp
 /07_midas_aruco_fusion/tests/
 /07_midas_aruco_fusion_new
+moil_undistorter.cpp
