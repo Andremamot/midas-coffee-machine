@@ -295,18 +295,10 @@ int main(int argc, char* argv[])
                 args.output_height
             );
 
-            /* Override ArUco camera matrix with Moildev focal length */
-            /* Use cap_width/cap_height as the expected stream resolution */
-            cv::Mat new_K = moil_undistorter->build_aruco_camera_matrix(
-                args.cap_width, args.cap_height);
-            aruco.camera_matrix = new_K;
-            std::cout << "[MOIL] ArUco camera matrix overridden:"
-                      << " fx=" << new_K.at<double>(0,0)
-                      << " fy=" << new_K.at<double>(1,1)
-                      << " cx=" << new_K.at<double>(0,2)
-                      << " cy=" << new_K.at<double>(1,2) << "\n";
-
-            std::cout << "[MOIL] Fisheye undistorter ready.\n\n";
+            /* NOTE: ArUco camera matrix TIDAK di-override dari Moildev.
+             * Tetap gunakan matrix dari calibration_params.yml yang sudah dikalibrasi
+             * dan memberikan Z_tray yang akurat. Override Moildev menyebabkan Z_tray 2x salah. */
+            std::cout << "[MOIL] Fisheye undistorter ready. ArUco menggunakan matrix dari calibration_params.yml.\n\n";
         } catch (const std::exception& e) {
             std::cerr << "[MOIL ERROR] Failed to initialize MoilUndistorter: "
                       << e.what() << "\n";

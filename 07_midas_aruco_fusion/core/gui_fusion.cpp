@@ -1,5 +1,6 @@
 #include "gui_fusion.hpp"
 #include "moil_undistorter.hpp"
+#include "live_pipeline.hpp"   /* extern g_midas_enabled */
 #include <camera/camera.h>
 #include <iostream>
 #include <sstream>
@@ -158,15 +159,20 @@ void GuiFusion::setup_ui() {
     g_signal_connect(btn_next_step_, "clicked", G_CALLBACK(on_next_step_clicked), this);
     gtk_box_pack_start(GTK_BOX(vb_a), btn_next_step_, FALSE, FALSE, 0);
 
-    chk_normalize_ = gtk_check_button_new_with_label("Enable Normalize Lighting");
+    chk_normalize_ = gtk_check_button_new_with_label("Normalize Lighting");
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk_normalize_), FALSE);
     g_signal_connect(chk_normalize_, "toggled", G_CALLBACK(on_chk_normalize_toggled), this);
     gtk_box_pack_start(GTK_BOX(vb_a), chk_normalize_, FALSE, FALSE, 5);
 
-    chk_bw_ = gtk_check_button_new_with_label("Enable Black & White Mode");
+    chk_bw_ = gtk_check_button_new_with_label("Black & White Mode");
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk_bw_), FALSE);
     g_signal_connect(chk_bw_, "toggled", G_CALLBACK(on_chk_bw_toggled), this);
     gtk_box_pack_start(GTK_BOX(vb_a), chk_bw_, FALSE, FALSE, 5);
+
+    chk_midas_ = gtk_check_button_new_with_label("MiDaS Depth ON");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk_midas_), TRUE);  /* default ON */
+    g_signal_connect(chk_midas_, "toggled", G_CALLBACK(on_chk_midas_toggled), this);
+    gtk_box_pack_start(GTK_BOX(vb_a), chk_midas_, FALSE, FALSE, 5);
 
     lbl_setup_hint_ = gtk_label_new("");
     gtk_label_set_line_wrap(GTK_LABEL(lbl_setup_hint_), TRUE);
@@ -357,10 +363,7 @@ void GuiFusion::on_btn_exp_clicked(GtkWidget* widget, gpointer data) {
         std::ostringstream ss;
         ss << std::fixed << std::setprecision(1) << val;
         gtk_entry_set_text(GTK_ENTRY(d->entry), ss.str().c_str());
-        // Auto apply
-        if (d->gui && d->gui->camera_) {
-            d->gui->camera_->set_smart_exposure(val);
-        }
+        /* Tidak auto-apply — user harus klik "Apply Exposure" */
     } catch (...) {}
 }
 
@@ -430,6 +433,12 @@ void GuiFusion::on_chk_normalize_toggled(GtkToggleButton* togglebutton, gpointer
 void GuiFusion::on_chk_bw_toggled(GtkToggleButton* togglebutton, gpointer data) {
     GuiFusion* self = static_cast<GuiFusion*>(data);
     self->bw_enabled_ = gtk_toggle_button_get_active(togglebutton);
+}
+
+void GuiFusion::on_chk_midas_toggled(GtkToggleButton* togglebutton, gpointer data) {
+    bool active = gtk_toggle_button_get_active(togglebutton);
+    g_midas_enabled.store(active);
+    std::cout << "[GUI] MiDaS " << (active ? "Enabled" : "Disabled") << "\n";
 }
 
 void GuiFusion::on_action_btn_clicked(GtkWidget* widget, gpointer data) {

@@ -8,6 +8,10 @@
 #include <opencv2/opencv.hpp>
 #include <string>
 #include <vector>
+#include <atomic>
+
+/* Global MiDaS toggle — defined in live_pipeline.cpp, accessible from gui_fusion */
+extern std::atomic<bool> g_midas_enabled;
 
 #include "aruco_detector.hpp"
 #include "moil_undistorter.hpp"

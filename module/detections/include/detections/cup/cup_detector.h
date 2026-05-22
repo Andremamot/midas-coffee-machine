@@ -15,7 +15,7 @@ public:
     CupDetector();
     ~CupDetector();
 
-    std::string model_path = "weights/cup_detection_v3_12_s_best.onnx";
+    std::string model_path = "weights/best.onnx";
     std::vector<std::string> class_names = {"cup_rim", "cup_body"};
 
     // onnx

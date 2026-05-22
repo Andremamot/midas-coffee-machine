@@ -27,9 +27,6 @@
 
 #include "moil_undistorter.hpp"
 
-// Include header yang sesuai dengan API lama (dari moildev_common.hpp)
-// Kita deklarasikan class Moildev minimal di sini sesuai ABI yang ada di library
-#include "../lib/include/moildev_common.hpp"
 
 #include <fstream>
 #include <iostream>

@@ -4,6 +4,7 @@ import numpy as np
 import threading
 import core.height_math as hm
 import core.session_reporter as sr
+import core.volume_math as vm
 import os
 from datetime import datetime
 
@@ -194,7 +195,7 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
             # UI Scaling factor (dinamis berdasarkan lebar frame)
             # Baseline: frame 2592x1944 -> S ≈ 2.5
             S = max(0.5, w_frame / 1000.0)
-            panel_w, panel_h = int(520 * S), int(135 * S)
+            panel_w, panel_h = int(560 * S), int(155 * S)
             cv2.rectangle(disp, (20, 20), (20 + panel_w, 20 + panel_h), (25, 25, 25), -1)
             cv2.rectangle(disp, (20, 20), (20 + panel_w, 20 + panel_h), (90, 90, 90), 2)
 
@@ -227,18 +228,26 @@ def run_live_pipeline(get_frame, cap, aruco, yolo, midas, headless, calib_data, 
                     cv2.putText(disp, f"Z_rim: {z_rim_val:.1f} cm", (int(280*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (100, 255, 100), 2)
 
                     if i < len(cup_bboxes):
-                        x1c, y1c, x2c, y2c = cup_bboxes[i]
-                        bbox_w = x2c - x1c
                         focal_px = aruco.camera_matrix[0, 0]
-                        diameter = (bbox_w * z_rim_val) / focal_px
-                        cv2.putText(disp, f"Diam: {diameter:.1f} cm", (int(410*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (200, 200, 255), 2)
+                        # Ukur lebar di level rim (strip atas bbox), bukan bbox_w penuh.
+                        # Ini mencegah overestimasi diameter pada gelas yang body > rim.
+                        rim_w_px = vm.measure_rim_width_px(frame, cup_bboxes[i])
+                        diameter = vm.calc_diameter(rim_w_px, z_rim_val, focal_px)
+                        volume_ml = vm.calc_volume(h_val, diameter)
+                        cv2.putText(disp, f"D:{diameter:.1f}cm", (int(395*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.45 * S, (200, 200, 255), 2)
+                        if volume_ml > 0:
+                            cv2.putText(disp, f"V:{volume_ml:.0f}mL", (int(480*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.45 * S, (255, 220, 80), 2)
+                        else:
+                            cv2.putText(disp, "V:--mL", (int(480*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.45 * S, (100, 100, 100), 2)
                     else:
-                        cv2.putText(disp, f"Diam: -- cm", (int(410*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (100, 100, 100), 2)
+                        cv2.putText(disp, f"D:-- cm", (int(395*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.45 * S, (100, 100, 100), 2)
+                        cv2.putText(disp, f"V:--mL", (int(480*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.45 * S, (100, 100, 100), 2)
                 else:
                     cv2.putText(disp, lbl, (int(40*S), y_pos-int(15*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.6 * S, (100, 100, 100), 2)
                     cv2.putText(disp, "-- cm", (int(115*S), y_pos+int(5*S)), cv2.FONT_HERSHEY_DUPLEX, 1.3 * S, (70, 70, 70), 4)
                     cv2.putText(disp, f"Z_rim: -- cm", (int(280*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (100, 100, 100), 2)
-                    cv2.putText(disp, f"Diam: -- cm", (int(410*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * S, (100, 100, 100), 2)
+                    cv2.putText(disp, f"D:-- cm", (int(395*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.45 * S, (100, 100, 100), 2)
+                    cv2.putText(disp, f"V:--mL", (int(480*S), y_pos-int(4*S)), cv2.FONT_HERSHEY_SIMPLEX, 0.45 * S, (100, 100, 100), 2)
 
             if is_recording:
                 if int(time.time() * 2) % 2 == 0:

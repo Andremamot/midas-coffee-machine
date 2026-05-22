@@ -11,6 +11,7 @@
 #include "session_reporter.hpp"
 #include "moil_undistorter.hpp"
 #include "gui_fusion.hpp"
+#include "volume_math.hpp"
 
 #include <detections/ai.h>
 
@@ -57,6 +58,9 @@ struct InferenceResult {
     std::vector<cv::Rect> cup_bboxes;
     std::array<double, 2> cup_heights_ema = {0.0, 0.0};
     std::array<bool, 2>   cup_heights_valid = {false, false};
+    std::array<double, 2> cup_diameters = {0.0, 0.0};
+    std::array<double, 2> cup_volumes   = {0.0, 0.0};
+    std::array<bool, 2>   cup_vol_valid = {false, false};
     cv::Mat               last_depth_norm;
     std::vector<ArucoResult> aruco_results;
     
@@ -74,6 +78,7 @@ static std::mutex              g_result_mutex;
 static std::condition_variable g_result_cv;
 static InferenceResult         g_shared_result;
 static std::atomic<bool>       g_pipeline_running{true};
+std::atomic<bool>              g_midas_enabled{true};  /* non-static: diakses extern dari gui_fusion.cpp */
 
 /*---------------------------------------------------------------------------*/
 /* Inference Worker Thread                                                    */
@@ -100,6 +105,9 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
     bool aruco_roi_valid = false;
     std::array<double, 2>  cup_heights_ema = {0.0, 0.0};
     std::array<bool, 2>    cup_heights_valid = {false, false};
+    std::array<double, 2>  cup_diameters = {0.0, 0.0};
+    std::array<double, 2>  cup_volumes   = {0.0, 0.0};
+    std::array<bool, 2>    cup_vol_valid = {false, false};
     int stats_total_frames = 0;
     int stats_midas_runs   = 0;
     
@@ -138,17 +146,10 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
         if (moil != nullptr && !no_anypoint) {
             frame = moil->undistort(frame);
 
-            /* IMPORTANT: Update ArUco camera matrix every frame.
-             * If zoom changes (mouse scroll), the equivalent focal length
-             * also changes. Failing to update causes wrong distance readings. */
-            cv::Mat new_K = moil->build_aruco_camera_matrix(frame.cols, frame.rows);
-            if (aruco.camera_matrix.empty() || aruco.camera_matrix.size() != new_K.size()) {
-                aruco.camera_matrix = new_K.clone();
-            } else {
-                new_K.copyTo(aruco.camera_matrix);
-            }
-            // Setelah Moildev undistortion, gambar sudah rektifikasi
-            // dist_coeffs harus 0 agar ArUco pose estimation tidak double-compensate
+            /* Setelah Moildev undistortion, gambar sudah rektifikasi.
+             * dist_coeffs di-zero agar ArUco pose estimation tidak double-compensate.
+             * Camera matrix TIDAK di-override — tetap pakai calibration_params.yml
+             * agar Z_tray akurat. */
             if (aruco.dist_coeffs.empty() || aruco.dist_coeffs.cols != 5) {
                 aruco.dist_coeffs = cv::Mat::zeros(1, 5, CV_64F);
             } else {
@@ -235,8 +236,51 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
 
                 for (auto& cd : valid_dets) current_cup_bboxes.push_back(cd.bbox);
 
-                /* MiDaS - hanya jalankan jika ArUco sudah terdeteksi */
-                if (z_tray_live > 0 && aruco_roi_valid) {
+                /* ── Geometric Height (ctype 5/7): tidak butuh MiDaS ── */
+                bool needs_midas = (ctype != 5 && ctype != 7);
+                if (!needs_midas && z_tray_live > 0) {
+                    for (int i = 0; i < 2; ++i) {
+                        double height_raw = 0.0;
+                        if (i < (int)current_cup_bboxes.size()) {
+                            const cv::Rect& bbox = current_cup_bboxes[i];
+                            if (ctype == 5) {
+                                double dynamic_focal = aruco.camera_matrix.empty() ? focal_px : aruco.camera_matrix.at<double>(0, 0);
+                                height_raw = HeightMath::calc_height_geom(
+                                    z_tray_live, bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height, dynamic_focal, active_poly_Kgeom);
+                            } else if (ctype == 7) {
+                                height_raw = HeightMath::calc_height_analytic(
+                                    z_tray_live, bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height,
+                                    calib_data.value("A", 0.0), calib_data.value("B", 0.0));
+                            }
+                            if (height_raw > 0.0) {
+                                if (!cup_heights_valid[i]) {
+                                    cup_heights_ema[i] = height_raw;
+                                    cup_heights_valid[i] = true;
+                                } else {
+                                    cup_heights_ema[i] = EMA_ALPHA * height_raw + (1.0 - EMA_ALPHA) * cup_heights_ema[i];
+                                }
+                            }
+                            if (cup_heights_valid[i]) {
+                                history_cup_h[i].push_back(cup_heights_ema[i]);
+                                double z_rim_val = std::max(0.0, z_tray_live - cup_heights_ema[i]);
+                                cup_diameters[i] = z_rim_val;
+                                cup_vol_valid[i] = true;
+                            } else {
+                                cup_vol_valid[i] = false;
+                                history_cup_h[i].push_back(0.0);
+                            }
+                        } else {
+                            cup_heights_valid[i] = false;
+                            cup_vol_valid[i]     = false;
+                            history_cup_h[i].push_back(0.0);
+                        }
+                    }
+                    history_z_tray.push_back(z_tray_live);
+                    history_frames.push_back(stats_total_frames);
+                }
+
+                /* ── MiDaS-based Height (ctype 1-4,6): butuh depth map ── */
+                if (needs_midas && z_tray_live > 0 && aruco_roi_valid && g_midas_enabled.load()) {
                     ai->LoadMidas();
                     cv::Mat depth_map = ai->midas_estimator->inference(frame);
                     stats_midas_runs++;
@@ -256,73 +300,63 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
 
                     float m_tray = ai->midas_estimator->get_tray_depth(depth_map, roi_scaled);
 
-                    bool needs_midas = (ctype != 5 && ctype != 7);
-
-                    if (!needs_midas || m_tray > 0) {
+                    if (m_tray > 0) {
                         for (int i = 0; i < 2; ++i) {
                             double height_raw = 0.0;
                             if (i < (int)current_cup_bboxes.size()) {
                                 const cv::Rect& bbox = current_cup_bboxes[i];
-                                
                                 cv::Rect bbox_scaled(
-                                    (int)(bbox.x * scale_x),
-                                    (int)(bbox.y * scale_y),
-                                    (int)(bbox.width * scale_x),
-                                    (int)(bbox.height * scale_y)
+                                    (int)(bbox.x * scale_x), (int)(bbox.y * scale_y),
+                                    (int)(bbox.width * scale_x), (int)(bbox.height * scale_y)
                                 );
-
                                 float m_rim = ai->midas_estimator->get_rim_depth(depth_map, bbox_scaled);
-                                if (!needs_midas || m_rim > 0) {
+                                if (m_rim > 0) {
                                     if (ctype == 2)
-                                        height_raw = HeightMath::calc_height_2point(
-                                            m_rim, m_tray, z_tray_live, calib_data.value("m", 0.1), calib_data.value("c", 0.0));
+                                        height_raw = HeightMath::calc_height_2point(m_rim, m_tray, z_tray_live, calib_data.value("m", 0.1), calib_data.value("c", 0.0));
                                     else if (ctype == 3)
-                                        height_raw = HeightMath::calc_height_zgrid(
-                                            m_rim, m_tray, z_tray_live, calib_data.value("poly_K", std::vector<double>{0.8}));
+                                        height_raw = HeightMath::calc_height_zgrid(m_rim, m_tray, z_tray_live, calib_data.value("poly_K", std::vector<double>{0.8}));
                                     else if (ctype == 4)
-                                        height_raw = HeightMath::calc_height_bbox(
-                                            m_rim, m_tray, z_tray_live, bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height,
+                                        height_raw = HeightMath::calc_height_bbox(m_rim, m_tray, z_tray_live, bbox.x, bbox.y, bbox.x+bbox.width, bbox.y+bbox.height,
                                             calib_data.value("m_ref", 0.15), calib_data.value("c_ref", 0.0), calib_data.value("ref_bbox_area_px", 10000.0));
-                                    else if (ctype == 5) {
-                                        double dynamic_focal = aruco.camera_matrix.empty() ? focal_px : aruco.camera_matrix.at<double>(0, 0);
-                                        height_raw = HeightMath::calc_height_geom(
-                                            z_tray_live, bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height, dynamic_focal, active_poly_Kgeom);
-                                        if (height_raw <= 0.0) height_raw = 0.1;
-                                    } else if (ctype == 6)
-                                        height_raw = HeightMath::calc_height_bilateral_zgrid(
-                                            m_rim, m_tray, z_tray_live, calib_data.value("poly_m", std::vector<double>{0.1, 0.0}),
+                                    else if (ctype == 6)
+                                        height_raw = HeightMath::calc_height_bilateral_zgrid(m_rim, m_tray, z_tray_live,
+                                            calib_data.value("poly_m", std::vector<double>{0.1, 0.0}),
                                             calib_data.value("poly_c", std::vector<double>{0.0, 0.0}));
-                                    else if (ctype == 7) {
-                                        height_raw = HeightMath::calc_height_analytic(
-                                            z_tray_live, bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height,
-                                            calib_data.value("A", 0.0), calib_data.value("B", 0.0));
-                                        if (height_raw <= 0.0) height_raw = 0.1;
-                                    } else
+                                    else
                                         height_raw = HeightMath::calc_height_1point(m_rim, m_tray, z_tray_live, calib_data.value("K", 0.8));
                                 }
-                            }
-
-                            if (height_raw > 0.0) {
-                                if (!cup_heights_valid[i]) {
-                                    cup_heights_ema[i] = height_raw;
-                                    cup_heights_valid[i] = true;
-                                } else {
-                                    cup_heights_ema[i] = EMA_ALPHA * height_raw + (1.0 - EMA_ALPHA) * cup_heights_ema[i];
+                                if (height_raw > 0.0) {
+                                    if (!cup_heights_valid[i]) {
+                                        cup_heights_ema[i] = height_raw;
+                                        cup_heights_valid[i] = true;
+                                    } else {
+                                        cup_heights_ema[i] = EMA_ALPHA * height_raw + (1.0 - EMA_ALPHA) * cup_heights_ema[i];
+                                    }
                                 }
-                                history_cup_h[i].push_back(cup_heights_ema[i]);
+                                if (cup_heights_valid[i]) {
+                                    history_cup_h[i].push_back(cup_heights_ema[i]);
+                                    double z_rim_val = std::max(0.0, z_tray_live - cup_heights_ema[i]);
+                                    cup_diameters[i] = z_rim_val;
+                                    cup_vol_valid[i] = true;
+                                } else {
+                                    cup_vol_valid[i] = false;
+                                    history_cup_h[i].push_back(0.0);
+                                }
                             } else {
                                 cup_heights_valid[i] = false;
+                                cup_vol_valid[i]     = false;
                                 history_cup_h[i].push_back(0.0);
                             }
                         }
                         history_z_tray.push_back(z_tray_live);
                         history_frames.push_back(stats_total_frames);
                     }
-                } // end if aruco_roi_valid
+                } // end MiDaS block
             } else {
                 /* No cups detected */
                 for (int i = 0; i < 2; ++i) {
                     cup_heights_valid[i] = false;
+                    cup_vol_valid[i] = false;
                     history_cup_h[i].push_back(0.0);
                 }
                 history_z_tray.push_back(z_tray_live);
@@ -342,6 +376,9 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
             }
             g_shared_result.cup_heights_ema = cup_heights_ema;
             g_shared_result.cup_heights_valid = cup_heights_valid;
+            g_shared_result.cup_diameters = cup_diameters;
+            g_shared_result.cup_volumes = cup_volumes;
+            g_shared_result.cup_vol_valid = cup_vol_valid;
             if (!current_depth_norm.empty()) {
                 g_shared_result.last_depth_norm = current_depth_norm.clone();
             }
@@ -412,6 +449,11 @@ void run_live_pipeline(Camera*                 cam,
     cv::VideoWriter   video_writer;
     std::vector<std::string> screenshot_paths;
 
+    /* FPS counter state */
+    double fps_display      = 0.0;
+    int    fps_frame_count  = 0;
+    double fps_last_time    = now_sec();
+
     try {
         while (g_pipeline_running) {
             cv::Mat frame = cam->get_frame();
@@ -458,6 +500,16 @@ void run_live_pipeline(Camera*                 cam,
             int h_frame = frame.rows, w_frame = frame.cols;
             cv::Mat disp = frame.clone();
 
+            /* ── FPS Calculation ── */
+            fps_frame_count++;
+            double now_disp = now_sec();
+            double elapsed  = now_disp - fps_last_time;
+            if (elapsed >= 0.5) {  /* update setiap 0.5 detik */
+                fps_display    = fps_frame_count / elapsed;
+                fps_frame_count = 0;
+                fps_last_time  = now_disp;
+            }
+
             /* ── Build display frame ── */
             /* NOTE: aruco object is owned by inference thread — do NOT call aruco.detect()
              * or aruco.annotate_frame() here. Use the snapshot from g_shared_result instead.
@@ -478,50 +530,91 @@ void run_live_pipeline(Camera*                 cam,
             for (auto& bbox : res.cup_bboxes)
                 cv::rectangle(disp, bbox, cv::Scalar(0, 255, 80), 2);
 
+            /* UI Scaling factor for Kakip */
+            double S = std::max(0.5, (double)w_frame / 1000.0);
+
             /* Info panel */
-            cv::rectangle(disp, cv::Point(8, 8), cv::Point(420, 130), cv::Scalar(25, 25, 25), -1);
-            cv::rectangle(disp, cv::Point(8, 8), cv::Point(420, 130), cv::Scalar(90, 90, 90), 1);
+            int panel_w = (int)(560 * S), panel_h = (int)(155 * S);
+            cv::rectangle(disp, cv::Point(20, 20), cv::Point(20 + panel_w, 20 + panel_h), cv::Scalar(25, 25, 25), -1);
+            cv::rectangle(disp, cv::Point(20, 20), cv::Point(20 + panel_w, 20 + panel_h), cv::Scalar(90, 90, 90), 2);
 
             /* MiDaS depth PiP */
             if (!res.last_depth_norm.empty()) {
                 cv::Mat depth_color;
                 cv::applyColorMap(res.last_depth_norm, depth_color, cv::COLORMAP_JET);
-                int pip_h = h_frame / 3, pip_w = w_frame / 3;
+                int pip_h = (int)(h_frame / 3.2), pip_w = (int)(w_frame / 3.2);
                 cv::Mat pip;
                 cv::resize(depth_color, pip, cv::Size(pip_w, pip_h));
-                int y1 = h_frame - pip_h - 26, x1 = w_frame - pip_w - 5;
+                int pip_margin = (int)(40 * S);
+                int y1 = h_frame - pip_h - pip_margin, x1 = w_frame - pip_w - (int)(10 * S);
                 if (x1 >= 0 && y1 >= 0 && x1+pip_w <= disp.cols && y1+pip_h <= disp.rows) {
                     pip.copyTo(disp(cv::Rect(x1, y1, pip_w, pip_h)));
                     cv::rectangle(disp, cv::Point(x1, y1), cv::Point(x1+pip_w, y1+pip_h), cv::Scalar(200,200,200), 2);
-                    cv::putText(disp, "MiDaS Depth", cv::Point(x1+6, y1+18), cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(255,255,255), 1);
+                    cv::putText(disp, "MiDaS Depth", cv::Point(x1+(int)(12*S), y1+(int)(28*S)), cv::FONT_HERSHEY_SIMPLEX, 0.5 * S, cv::Scalar(255,255,255), 2);
                 }
             }
 
             /* Cup height text */
-            cv::putText(disp, "CUP HEIGHTS", cv::Point(18,30), cv::FONT_HERSHEY_SIMPLEX, 0.48, cv::Scalar(170,170,170), 1);
+            cv::putText(disp, "CUP HEIGHTS", cv::Point((int)(40*S), (int)(45*S)), cv::FONT_HERSHEY_SIMPLEX, 0.55 * S, cv::Scalar(170,170,170), 2);
             {
                 std::ostringstream oss;
                 oss << std::fixed << std::setprecision(1) << "Z_tray: " << res.z_tray_live << " cm";
-                cv::putText(disp, oss.str(), cv::Point(210,25), cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(255,160,60), 1);
+                cv::putText(disp, oss.str(), cv::Point((int)(230*S), (int)(40*S)), cv::FONT_HERSHEY_SIMPLEX, 0.5 * S, cv::Scalar(255,160,60), 2);
+            }
+            /* MiDaS status badge */
+            {
+                bool midas_on = g_midas_enabled.load();
+                std::string midas_lbl = midas_on ? "MiDaS:ON" : "MiDaS:OFF";
+                cv::Scalar  midas_clr = midas_on ? cv::Scalar(80,220,80) : cv::Scalar(60,60,200);
+                cv::putText(disp, midas_lbl, cv::Point((int)(395*S), (int)(40*S)), cv::FONT_HERSHEY_SIMPLEX, 0.45 * S, midas_clr, 2);
             }
 
-            int base_y = 65;
+            int base_y = (int)(95 * S);
             for (int i = 0; i < 2; ++i) {
-                int y_pos = base_y + i * 38;
+                int y_pos = base_y + i * (int)(50 * S);
                 std::string lbl = "CUP " + std::to_string(i+1) + ":";
                 if (res.cup_heights_valid[i] && res.cup_heights_ema[i] > 0) {
                     std::ostringstream oss;
                     oss << std::fixed << std::setprecision(1) << res.cup_heights_ema[i] << " cm";
-                    cv::putText(disp, lbl, cv::Point(18, y_pos-8), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(200,200,200), 1);
-                    cv::putText(disp, oss.str(), cv::Point(85, y_pos+2), cv::FONT_HERSHEY_DUPLEX, 1.2, cv::Scalar(0,255,100), 2);
+                    cv::putText(disp, lbl, cv::Point((int)(40*S), y_pos-(int)(15*S)), cv::FONT_HERSHEY_SIMPLEX, 0.6 * S, cv::Scalar(200,200,200), 2);
+                    cv::putText(disp, oss.str(), cv::Point((int)(115*S), y_pos+(int)(5*S)), cv::FONT_HERSHEY_DUPLEX, 1.3 * S, cv::Scalar(0,255,100), 3);
                     double z_rim_val = std::max(0.0, res.z_tray_live - res.cup_heights_ema[i]);
                     std::ostringstream oss2;
                     oss2 << "Z_rim: " << std::fixed << std::setprecision(1) << z_rim_val << " cm";
-                    cv::putText(disp, oss2.str(), cv::Point(250, y_pos-2), cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(100,255,100), 1);
+                    cv::putText(disp, oss2.str(), cv::Point((int)(280*S), y_pos-(int)(4*S)), cv::FONT_HERSHEY_SIMPLEX, 0.5 * S, cv::Scalar(100,255,100), 2);
+
+                    if (res.cup_vol_valid[i]) {
+                        /* Hitung diameter & volume di display thread menggunakan bbox display frame */
+                        double z_rim_stored = res.cup_diameters[i];  /* z_rim_val yg disimpan inference thread */
+                        /* focal_px tersedia sebagai variabel lokal di run_live_pipeline */
+                        double diameter = 0.0, volume_ml = 0.0;
+                        if (focal_px > 0.0 && i < (int)res.cup_bboxes.size()) {
+                            float rim_w_px = VolumeMath::measureRimWidthPx(disp, res.cup_bboxes[i]);
+                            diameter  = VolumeMath::calcDiameter(rim_w_px, z_rim_stored, focal_px);
+                            volume_ml = VolumeMath::calcVolume(res.cup_heights_ema[i], diameter);
+                        }
+                        std::ostringstream ossD;
+                        ossD << "D:" << std::fixed << std::setprecision(1) << diameter << "cm";
+                        cv::putText(disp, ossD.str(), cv::Point((int)(395*S), y_pos-(int)(4*S)), cv::FONT_HERSHEY_SIMPLEX, 0.45 * S, cv::Scalar(200,200,255), 2);
+
+                        std::ostringstream ossV;
+                        if (volume_ml > 0) {
+                            ossV << "V:" << std::fixed << std::setprecision(0) << volume_ml << "mL";
+                            cv::putText(disp, ossV.str(), cv::Point((int)(480*S), y_pos-(int)(4*S)), cv::FONT_HERSHEY_SIMPLEX, 0.45 * S, cv::Scalar(255,220,80), 2);
+                        } else {
+                            cv::putText(disp, "V:--mL", cv::Point((int)(480*S), y_pos-(int)(4*S)), cv::FONT_HERSHEY_SIMPLEX, 0.45 * S, cv::Scalar(100,100,100), 2);
+                        }
+                    } else {
+                        /* cup_vol_valid false: tampilkan D:-- V:-- */
+                        cv::putText(disp, "D:-- cm", cv::Point((int)(395*S), y_pos-(int)(4*S)), cv::FONT_HERSHEY_SIMPLEX, 0.45 * S, cv::Scalar(100,100,100), 2);
+                        cv::putText(disp, "V:--mL",  cv::Point((int)(480*S), y_pos-(int)(4*S)), cv::FONT_HERSHEY_SIMPLEX, 0.45 * S, cv::Scalar(100,100,100), 2);
+                    }
                 } else {
-                    cv::putText(disp, lbl, cv::Point(18, y_pos-8), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(100,100,100), 1);
-                    cv::putText(disp, "-- cm", cv::Point(85, y_pos+2), cv::FONT_HERSHEY_DUPLEX, 1.2, cv::Scalar(70,70,70), 2);
-                    cv::putText(disp, "Z_rim: -- cm", cv::Point(250, y_pos-2), cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(100,100,100), 1);
+                    cv::putText(disp, lbl, cv::Point((int)(40*S), y_pos-(int)(15*S)), cv::FONT_HERSHEY_SIMPLEX, 0.6 * S, cv::Scalar(100,100,100), 2);
+                    cv::putText(disp, "-- cm", cv::Point((int)(115*S), y_pos+(int)(5*S)), cv::FONT_HERSHEY_DUPLEX, 1.3 * S, cv::Scalar(70,70,70), 3);
+                    cv::putText(disp, "Z_rim: -- cm", cv::Point((int)(280*S), y_pos-(int)(4*S)), cv::FONT_HERSHEY_SIMPLEX, 0.5 * S, cv::Scalar(100,100,100), 2);
+                    cv::putText(disp, "D:-- cm", cv::Point((int)(395*S), y_pos-(int)(4*S)), cv::FONT_HERSHEY_SIMPLEX, 0.45 * S, cv::Scalar(100,100,100), 2);
+                    cv::putText(disp, "V:--mL",  cv::Point((int)(480*S), y_pos-(int)(4*S)), cv::FONT_HERSHEY_SIMPLEX, 0.45 * S, cv::Scalar(100,100,100), 2);
                 }
             }
 
@@ -536,15 +629,24 @@ void run_live_pipeline(Camera*                 cam,
             }
 
             /* Status bar */
-            cv::rectangle(disp, cv::Point(0, h_frame-26), cv::Point(w_frame, h_frame), cv::Scalar(15,15,15), -1);
+            int bar_h = (int)(45 * S);
+            cv::rectangle(disp, cv::Point(0, h_frame - bar_h), cv::Point(w_frame, h_frame), cv::Scalar(15,15,15), -1);
             std::string bar_txt =
                 "ArUco: " + std::string(res.z_tray_live > 0 ? "OK" : "X") +
                 " | YOLO: " + std::string(res.cup_bboxes.empty() ? "X" : "OK");
-            bar_txt += " | [V]=Record  [S]=Screen  [Q]=Quit";
-            cv::putText(disp, bar_txt, cv::Point(10, h_frame-8), cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(130,200,130), 1);
+            bar_txt += " | [V]=Rec [S]=Shot [M]=MiDaS [Q]=Quit";
+            /* FPS di status bar */
+            {
+                std::ostringstream oss_fps_bar;
+                oss_fps_bar << std::fixed << std::setprecision(1) << "  FPS:" << fps_display;
+                bar_txt += oss_fps_bar.str();
+            }
+            cv::putText(disp, bar_txt, cv::Point((int)(20*S), h_frame - (int)(15*S)), cv::FONT_HERSHEY_SIMPLEX, 0.5 * S, cv::Scalar(130,200,130), 2);
 
             if (ctype == 5) {
-                cv::putText(disp, "TARGET MENU: " + active_cup_str + " cm", cv::Point(18, 105), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,255,255), 2);
+                /* Tampilkan TARGET MENU di BAWAH panel, bukan di dalam row Cup 2 */
+                int target_y = 20 + (int)(155 * S) + (int)(30 * S);
+                cv::putText(disp, "TARGET MENU: " + active_cup_str + " cm", cv::Point((int)(40*S), target_y), cv::FONT_HERSHEY_SIMPLEX, 0.65 * S, cv::Scalar(0,255,255), 2);
             }
 
             if (!headless) {
@@ -565,6 +667,11 @@ void run_live_pipeline(Camera*                 cam,
                     cv::imwrite(ss_path, disp);
                     screenshot_paths.push_back(ss_path);
                     std::cout << "[SHOT] Screenshot saved: " << ss_path << "\n";
+                } else if (key == 'm' || key == 'M') {
+                    /* Toggle MiDaS on/off */
+                    bool prev = g_midas_enabled.load();
+                    g_midas_enabled.store(!prev);
+                    std::cout << "[MIDAS] " << (prev ? "Disabled" : "Enabled") << "\n";
                 } else if (key == 'v') {
                     /* Video recording toggle — changed from 'r' to 'v' to free 'r' for reset */
                     if (!is_recording) {

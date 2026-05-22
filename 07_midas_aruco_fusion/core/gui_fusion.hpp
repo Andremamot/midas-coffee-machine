@@ -53,6 +53,7 @@ private:
     GtkWidget* btn_next_step_;
     GtkWidget* chk_normalize_;
     GtkWidget* chk_bw_;
+    GtkWidget* chk_midas_;   /* toggle MiDaS on/off */
     GtkWidget* lbl_setup_hint_;
 
     std::queue<int> key_queue_;
@@ -83,6 +84,7 @@ private:
     static void on_next_step_clicked(GtkWidget* widget, gpointer data);
     static void on_chk_normalize_toggled(GtkToggleButton* togglebutton, gpointer data);
     static void on_chk_bw_toggled(GtkToggleButton* togglebutton, gpointer data);
+    static void on_chk_midas_toggled(GtkToggleButton* togglebutton, gpointer data);
     
     static void on_action_btn_clicked(GtkWidget* widget, gpointer data);
 
