@@ -1,14 +1,12 @@
 /**
  * @file volume_config.h
- * @brief Hardcoded operational parameters untuk mod_volume.
+ * @brief Hardcoded operational parameters for mod_volume.
  *
  * Semua konstanta konfigurasi kamera dan Moildev yang sudah dikalibrasi
  * dikumpulkan di satu file agar mudah dicek dan diaudit.
  *
  * JANGAN ganti REMAP_INTERP ke INTER_CUBIC/INTER_LANCZOS4 —
  * menyebabkan crash SIGABRT karena race condition OpenCL ↔ frame update.
- *
- * Dipaketkan sebagai bagian dari mod_volume dengan pola backup_module.
  */
 
 #pragma once
@@ -19,7 +17,7 @@ namespace fusion {
 namespace volume_config {
 
 // ── ArUco Marker ─────────────────────────────────────────────────────────────
-constexpr double MARKER_SIZE_CM = 2.5;   ///< Ukuran fisik sisi marker ArUco (cm)
+constexpr double MARKER_SIZE_CM = 2.5;
 
 // ── Moildev Anypoint ─────────────────────────────────────────────────────────
 constexpr double MOIL_ZOOM      = 2.0;    ///< Hybrid: moil 1.5x + digital 1.33x
@@ -36,8 +34,8 @@ constexpr int    V4L2_EXPOSURE  = 5000;  ///< = smart_exposure 5.0 di Python
 /// SELALU INTER_LINEAR — thread-safe, tidak trigger OpenCL race condition.
 constexpr int    REMAP_INTERP   = cv::INTER_LINEAR;
 
-// ── EMA (Exponential Moving Average) ─────────────────────────────────────────
-constexpr double EMA_ALPHA      = 0.35;   ///< Koefisien EMA untuk smoothing height
+// ── EMA ──────────────────────────────────────────────────────────────────────
+constexpr double EMA_ALPHA      = 0.35;
 
 }  // namespace volume_config
 }  // namespace fusion
