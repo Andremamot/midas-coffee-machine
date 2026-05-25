@@ -78,7 +78,6 @@ static std::mutex              g_result_mutex;
 static std::condition_variable g_result_cv;
 static InferenceResult         g_shared_result;
 static std::atomic<bool>       g_pipeline_running{true};
-std::atomic<bool>              g_midas_enabled{true};  /* non-static: diakses extern dari gui_fusion.cpp */
 
 /*---------------------------------------------------------------------------*/
 /* Inference Worker Thread                                                    */
@@ -236,9 +235,8 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
 
                 for (auto& cd : valid_dets) current_cup_bboxes.push_back(cd.bbox);
 
-                /* ── Geometric Height (ctype 5/7): tidak butuh MiDaS ── */
-                bool needs_midas = (ctype != 5 && ctype != 7);
-                if (!needs_midas && z_tray_live > 0) {
+                /* ── Geometric Height (ctype 5/7) ── */
+                if (z_tray_live > 0) {
                     for (int i = 0; i < 2; ++i) {
                         double height_raw = 0.0;
                         if (i < (int)current_cup_bboxes.size()) {
@@ -252,6 +250,7 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
                                     z_tray_live, bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height,
                                     calib_data.value("A", 0.0), calib_data.value("B", 0.0));
                             }
+                            // Catatan: ctype 1-4, 6 sebelumnya bergantung pada MiDaS. Karena MiDaS dicopot, tinggi akan 0.0.
                             if (height_raw > 0.0) {
                                 if (!cup_heights_valid[i]) {
                                     cup_heights_ema[i] = height_raw;
@@ -278,80 +277,6 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
                     history_z_tray.push_back(z_tray_live);
                     history_frames.push_back(stats_total_frames);
                 }
-
-                /* ── MiDaS-based Height (ctype 1-4,6): butuh depth map ── */
-                if (needs_midas && z_tray_live > 0 && aruco_roi_valid && g_midas_enabled.load()) {
-                    ai->LoadMidas();
-                    cv::Mat depth_map = ai->midas_estimator->inference(frame);
-                    stats_midas_runs++;
-                    ran_midas_this_loop = true;
-
-                    cv::normalize(depth_map, current_depth_norm, 0, 255, cv::NORM_MINMAX, CV_8U);
-
-                    float scale_x = (float)depth_map.cols / frame.cols;
-                    float scale_y = (float)depth_map.rows / frame.rows;
-
-                    cv::Rect roi_scaled(
-                        (int)(aruco_roi.x * scale_x),
-                        (int)(aruco_roi.y * scale_y),
-                        (int)(aruco_roi.width * scale_x),
-                        (int)(aruco_roi.height * scale_y)
-                    );
-
-                    float m_tray = ai->midas_estimator->get_tray_depth(depth_map, roi_scaled);
-
-                    if (m_tray > 0) {
-                        for (int i = 0; i < 2; ++i) {
-                            double height_raw = 0.0;
-                            if (i < (int)current_cup_bboxes.size()) {
-                                const cv::Rect& bbox = current_cup_bboxes[i];
-                                cv::Rect bbox_scaled(
-                                    (int)(bbox.x * scale_x), (int)(bbox.y * scale_y),
-                                    (int)(bbox.width * scale_x), (int)(bbox.height * scale_y)
-                                );
-                                float m_rim = ai->midas_estimator->get_rim_depth(depth_map, bbox_scaled);
-                                if (m_rim > 0) {
-                                    if (ctype == 2)
-                                        height_raw = HeightMath::calc_height_2point(m_rim, m_tray, z_tray_live, calib_data.value("m", 0.1), calib_data.value("c", 0.0));
-                                    else if (ctype == 3)
-                                        height_raw = HeightMath::calc_height_zgrid(m_rim, m_tray, z_tray_live, calib_data.value("poly_K", std::vector<double>{0.8}));
-                                    else if (ctype == 4)
-                                        height_raw = HeightMath::calc_height_bbox(m_rim, m_tray, z_tray_live, bbox.x, bbox.y, bbox.x+bbox.width, bbox.y+bbox.height,
-                                            calib_data.value("m_ref", 0.15), calib_data.value("c_ref", 0.0), calib_data.value("ref_bbox_area_px", 10000.0));
-                                    else if (ctype == 6)
-                                        height_raw = HeightMath::calc_height_bilateral_zgrid(m_rim, m_tray, z_tray_live,
-                                            calib_data.value("poly_m", std::vector<double>{0.1, 0.0}),
-                                            calib_data.value("poly_c", std::vector<double>{0.0, 0.0}));
-                                    else
-                                        height_raw = HeightMath::calc_height_1point(m_rim, m_tray, z_tray_live, calib_data.value("K", 0.8));
-                                }
-                                if (height_raw > 0.0) {
-                                    if (!cup_heights_valid[i]) {
-                                        cup_heights_ema[i] = height_raw;
-                                        cup_heights_valid[i] = true;
-                                    } else {
-                                        cup_heights_ema[i] = EMA_ALPHA * height_raw + (1.0 - EMA_ALPHA) * cup_heights_ema[i];
-                                    }
-                                }
-                                if (cup_heights_valid[i]) {
-                                    history_cup_h[i].push_back(cup_heights_ema[i]);
-                                    double z_rim_val = std::max(0.0, z_tray_live - cup_heights_ema[i]);
-                                    cup_diameters[i] = z_rim_val;
-                                    cup_vol_valid[i] = true;
-                                } else {
-                                    cup_vol_valid[i] = false;
-                                    history_cup_h[i].push_back(0.0);
-                                }
-                            } else {
-                                cup_heights_valid[i] = false;
-                                cup_vol_valid[i]     = false;
-                                history_cup_h[i].push_back(0.0);
-                            }
-                        }
-                        history_z_tray.push_back(z_tray_live);
-                        history_frames.push_back(stats_total_frames);
-                    }
-                } // end MiDaS block
             } else {
                 /* No cups detected */
                 for (int i = 0; i < 2; ++i) {

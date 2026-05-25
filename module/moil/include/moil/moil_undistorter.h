@@ -181,7 +181,8 @@ private:
 
     // Remap maps (float32)
     cv::Mat map_x_, map_y_;
-    mutable std::mutex maps_mutex_;  ///< Protects map_x_, map_y_ dari concurrent undistort()
+    cv::Mat map1_16s_, map2_16s_;    ///< Pre-converted Fixed-Point maps for faster remap
+    mutable std::mutex maps_mutex_;  ///< Protects maps dari concurrent undistort()
 
     // Internal: re-generate maps dari params saat ini
     void rebuild_maps_();

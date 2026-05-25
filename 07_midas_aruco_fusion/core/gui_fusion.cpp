@@ -1,6 +1,5 @@
 #include "gui_fusion.hpp"
 #include "moil_undistorter.hpp"
-#include "live_pipeline.hpp"   /* extern g_midas_enabled */
 #include <camera/camera.h>
 #include <iostream>
 #include <sstream>
@@ -168,11 +167,6 @@ void GuiFusion::setup_ui() {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk_bw_), FALSE);
     g_signal_connect(chk_bw_, "toggled", G_CALLBACK(on_chk_bw_toggled), this);
     gtk_box_pack_start(GTK_BOX(vb_a), chk_bw_, FALSE, FALSE, 5);
-
-    chk_midas_ = gtk_check_button_new_with_label("MiDaS Depth ON");
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(chk_midas_), TRUE);  /* default ON */
-    g_signal_connect(chk_midas_, "toggled", G_CALLBACK(on_chk_midas_toggled), this);
-    gtk_box_pack_start(GTK_BOX(vb_a), chk_midas_, FALSE, FALSE, 5);
 
     lbl_setup_hint_ = gtk_label_new("");
     gtk_label_set_line_wrap(GTK_LABEL(lbl_setup_hint_), TRUE);
@@ -433,12 +427,6 @@ void GuiFusion::on_chk_normalize_toggled(GtkToggleButton* togglebutton, gpointer
 void GuiFusion::on_chk_bw_toggled(GtkToggleButton* togglebutton, gpointer data) {
     GuiFusion* self = static_cast<GuiFusion*>(data);
     self->bw_enabled_ = gtk_toggle_button_get_active(togglebutton);
-}
-
-void GuiFusion::on_chk_midas_toggled(GtkToggleButton* togglebutton, gpointer data) {
-    bool active = gtk_toggle_button_get_active(togglebutton);
-    g_midas_enabled.store(active);
-    std::cout << "[GUI] MiDaS " << (active ? "Enabled" : "Disabled") << "\n";
 }
 
 void GuiFusion::on_action_btn_clicked(GtkWidget* widget, gpointer data) {
