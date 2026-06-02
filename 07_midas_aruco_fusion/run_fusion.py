@@ -22,7 +22,7 @@ from datetime import datetime
 import core.calibration_storage as cs
 import core.height_math as hm
 import core.session_reporter as sr
-from core.moil_undistorter import MoilUndistorter
+from core.moildev_applicator import MoildevApplicator
 from core.anypoint_controller import AnypointController
 from core.image_preprocess import normalize_lighting
 
@@ -217,7 +217,7 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
             moil_zoom    = float(getattr(args, "moil_zoom",   2.0))
 
             h, w = tmp_frame.shape[:2]
-            moil_undistorter = MoilUndistorter(
+            moil_undistorter = MoildevApplicator(
                 json_path    = json_path,
                 camera_name  = camera_name,
                 pitch        = moil_pitch,
@@ -245,7 +245,7 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
             anypoint_ctrl = AnypointController(moil_undistorter)
 
         except Exception as e:
-            print(f"[MOIL ERROR] Gagal inisiasi MoilUndistorter: {e}")
+            print(f"[MOIL ERROR] Gagal inisiasi MoildevApplicator: {e}")
             print("[MOIL] Melanjutkan tanpa fisheye undistortion.")
             moil_undistorter = None
             anypoint_ctrl    = None

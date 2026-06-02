@@ -1,11 +1,15 @@
 #include "gui_fusion.hpp"
-#include "moil_undistorter.hpp"
+#include "moildev_applicator.hpp"
 #include <camera/camera.h>
 #include <iostream>
 #include <sstream>
 #include <iomanip>
 #include <chrono>
 #include <thread>
+#include <atomic>
+
+/* Shared with run_fusion.cpp — true once gtk_main() event loop is running */
+extern std::atomic<bool> g_gui_ready;
 
 struct IdleImageData {
     GuiFusion* gui;
@@ -25,7 +29,7 @@ struct ActionData {
     int key;
 };
 
-GuiFusion::GuiFusion(MoilUndistorter* moil_undistorter, bool headless, int initial_exposure, Camera* camera)
+GuiFusion::GuiFusion(MoildevApplicator* moil_undistorter, bool headless, int initial_exposure, Camera* camera)
     : moil_undistorter_(moil_undistorter),
       headless_(headless),
       initial_exposure_(initial_exposure),
@@ -190,12 +194,13 @@ void GuiFusion::setup_ui() {
     image_ = gtk_image_new();
     gtk_box_pack_start(GTK_BOX(hbox), image_, TRUE, TRUE, 0);
 
-    gtk_widget_show_all(window_);
-    
-    // Hide calibration buttons after show_all
-    gtk_widget_hide(btn_start_calib_);
-    gtk_widget_hide(btn_next_step_);
-    gtk_widget_hide(lbl_setup_hint_);
+    /* NOTE: Do NOT call gtk_widget_show_all() here.
+     * On Wayland (Renesas Yocto), the compositor only processes surface
+     * creation events AFTER gtk_main() has started its event loop.
+     * Calling show_all() here (before gtk_main) causes the window to
+     * never be rendered — the Wayland surface commit is silently dropped.
+     * show_all() is called from main() just before gtk_main() starts.
+     */
 }
 
 void GuiFusion::show_all() {
@@ -209,6 +214,9 @@ void GuiFusion::show_all() {
 
 void GuiFusion::update_image(const cv::Mat& frame_bgr) {
     if (headless_ || !alive_) return;
+    /* NOTE: g_idle_add() sebelum gtk_main() tetap valid di GTK —
+     * callbacks antri di GLib main loop dan dieksekusi saat gtk_main() mulai.
+     * Tidak perlu guard g_gui_ready di sini. */
 
     double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if (now - last_ui_frame_t_ < 0.05) return; // limit to 20 FPS
@@ -272,7 +280,7 @@ bool GuiFusion::is_bw_enabled() const {
 }
 
 void GuiFusion::set_status_calib(const std::string& text) {
-    if (headless_) return;
+    if (headless_ || !g_gui_ready.load()) return;
     g_idle_add([](gpointer data) -> gboolean {
         auto p = static_cast<std::pair<GuiFusion*, std::string>*>(data);
         if (p->first->alive_) gtk_label_set_text(GTK_LABEL(p->first->lbl_status_calib_), p->second.c_str());
@@ -282,7 +290,7 @@ void GuiFusion::set_status_calib(const std::string& text) {
 }
 
 void GuiFusion::set_status_ai(const std::string& text) {
-    if (headless_) return;
+    if (headless_ || !g_gui_ready.load()) return;
     g_idle_add([](gpointer data) -> gboolean {
         auto p = static_cast<std::pair<GuiFusion*, std::string>*>(data);
         if (p->first->alive_) gtk_label_set_text(GTK_LABEL(p->first->lbl_status_ai_), p->second.c_str());
@@ -292,7 +300,7 @@ void GuiFusion::set_status_ai(const std::string& text) {
 }
 
 void GuiFusion::enter_setup_mode(const std::string& calib_name) {
-    if (headless_) return;
+    if (headless_ || !g_gui_ready.load()) return;
     std::string hint = "Setup mode: adjust exposure & anypoint,\nthen click \u25B6 Start " + calib_name;
     g_idle_add([](gpointer data) -> gboolean {
         auto p = static_cast<std::pair<GuiFusion*, std::string>*>(data);

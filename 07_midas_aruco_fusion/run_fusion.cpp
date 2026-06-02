@@ -48,13 +48,17 @@
 #include "core/calibration_routines.hpp"
 #include "core/calibration_storage.hpp"
 #include "core/live_pipeline.hpp"
-#include "core/moil_undistorter.hpp"
+#include "core/moildev_applicator.hpp"
 #include "core/gui_fusion.hpp"
 #include "aruco_detector.hpp"
 
 #include <gtk/gtk.h>
 #include <thread>
+#include <atomic>
 
+/* ── GUI sync: set true by gtk_main's first idle, so worker thread
+ * can know the event loop is running before posting g_idle_add()  ── */
+std::atomic<bool> g_gui_ready{false};
 
 namespace fs = std::filesystem;
 
@@ -270,7 +274,7 @@ int main(int argc, char* argv[])
     }
 
     /* ── Initialize Moildev fisheye undistorter (only if --fisheye) ──── */
-    std::unique_ptr<MoilUndistorter>  moil_undistorter;
+    std::unique_ptr<MoildevApplicator>  moil_undistorter;
 
     if (args.fisheye) {
         std::cout << "[MOIL] Initializing fisheye undistorter...\n";
@@ -281,7 +285,7 @@ int main(int argc, char* argv[])
                   << "  roll="  << args.moil_roll
                   << "  zoom="  << args.moil_zoom << "\n";
         try {
-            moil_undistorter = std::make_unique<MoilUndistorter>(
+            moil_undistorter = std::make_unique<MoildevApplicator>(
                 args.cam_params_json,
                 args.moil_camera_name,
                 args.moil_pitch,
@@ -300,7 +304,7 @@ int main(int argc, char* argv[])
              * dan memberikan Z_tray yang akurat. Override Moildev menyebabkan Z_tray 2x salah. */
             std::cout << "[MOIL] Fisheye undistorter ready. ArUco menggunakan matrix dari calibration_params.yml.\n\n";
         } catch (const std::exception& e) {
-            std::cerr << "[MOIL ERROR] Failed to initialize MoilUndistorter: "
+            std::cerr << "[MOIL ERROR] Failed to initialize MoildevApplicator: "
                       << e.what() << "\n";
             std::cerr << "[MOIL] Continuing WITHOUT fisheye undistortion.\n\n";
             moil_undistorter.reset();
@@ -310,9 +314,24 @@ int main(int argc, char* argv[])
     /* ── Initialize GUI ───────────────────────────────────────────────── */
     std::shared_ptr<GuiFusion> gui;
     if (!args.headless) {
-        gtk_init(&argc, &argv);
-        gui = std::make_shared<GuiFusion>(moil_undistorter.get(), args.headless, args.manual_exposure, &cam);
-        std::cout << "[GUI] GTK3 Interface Active\n\n";
+        /* Log display environment — sangat berguna untuk debugging di Renesas Yocto */
+        const char* disp_env    = getenv("DISPLAY");
+        const char* wayland_env = getenv("WAYLAND_DISPLAY");
+        const char* xdg_env     = getenv("XDG_RUNTIME_DIR");
+        std::cout << "[ENV] DISPLAY         = " << (disp_env    ? disp_env    : "(not set)") << "\n";
+        std::cout << "[ENV] WAYLAND_DISPLAY = " << (wayland_env ? wayland_env : "(not set)") << "\n";
+        std::cout << "[ENV] XDG_RUNTIME_DIR = " << (xdg_env     ? xdg_env     : "(not set)") << "\n";
+
+        if (!gtk_init_check(&argc, &argv)) {
+            std::cerr << "[WARN] GTK init failed — no display available (DISPLAY/WAYLAND_DISPLAY not set?).\n";
+            std::cerr << "[WARN] Falling back to headless mode automatically.\n";
+            std::cerr << "[HINT] On Renesas Yocto+Wayland: export WAYLAND_DISPLAY=wayland-0 && export XDG_RUNTIME_DIR=/run/user/0\n";
+            std::cerr << "[HINT] Then re-run the application.\n";
+            args.headless = true;
+        } else {
+            gui = std::make_shared<GuiFusion>(moil_undistorter.get(), args.headless, args.manual_exposure, &cam);
+            std::cout << "[GUI] GTK3 Interface created (Wayland/X11 backend active).\n\n";
+        }
     }
 
     /* ── Worker Thread ───────────────────────────────────────────────── */
@@ -474,6 +493,14 @@ int main(int argc, char* argv[])
 
     if (!args.headless && gui) {
         gui->show_all();
+        std::cout << "[GUI] Window shown — starting gtk_main() event loop...\n";
+        /* Signal to worker thread that the GTK event loop is about to run.
+         * g_idle_add() called from bg_thread before gtk_main() is risky on
+         * Wayland — the idle source may never fire. We signal readiness here. */
+        g_idle_add([](gpointer) -> gboolean {
+            g_gui_ready.store(true);
+            return G_SOURCE_REMOVE;
+        }, nullptr);
         gtk_main();
     }
     

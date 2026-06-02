@@ -7,12 +7,12 @@
 #include <queue>
 #include <mutex>
 
-class MoilUndistorter;
+class MoildevApplicator;
 class Camera;
 
 class GuiFusion {
 public:
-    GuiFusion(MoilUndistorter* moil_undistorter, bool headless, int initial_exposure, Camera* camera = nullptr);
+    GuiFusion(MoildevApplicator* moil_undistorter, bool headless, int initial_exposure, Camera* camera = nullptr);
     ~GuiFusion();
 
     void show_all();
@@ -33,7 +33,7 @@ public:
     bool is_calibration_ready() const;
 
 private:
-    MoilUndistorter* moil_undistorter_;
+    MoildevApplicator* moil_undistorter_;
     Camera*          camera_;
     bool headless_;
     int initial_exposure_;

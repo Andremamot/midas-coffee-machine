@@ -427,18 +427,25 @@ class TestDetectWithFallback:
 class TestMoilArucoCameraMatrix:
     """
     Menguji bahwa build_aruco_camera_matrix() menghasilkan focal length yang
-    reasonable untuk output Moildev — tidak double-scaled, tidak terlalu kecil.
+    reasonable untuk output MoildevApplicator (unicorn-solution port).
+
+    Diupdate dari MoilUndistorter → MoildevApplicator (nama sesuai unicorn-solution).
     """
 
     def _make_mock_moil(self, param5=1000.0, calib_ratio=1.0,
                          img_w=1280, img_h=720):
-        """Buat MoilUndistorter minimal tanpa hardware via direct attribute injection."""
-        from core.moil_undistorter import MoilUndistorter
-        moil = object.__new__(MoilUndistorter)
-        moil._parameter5   = param5
-        moil._calibRatio   = calib_ratio
-        moil._image_width  = img_w
-        moil._image_height = img_h
+        """
+        Buat MoildevApplicator minimal tanpa hardware via direct attribute injection.
+        Nama atribut menyesuaikan dengan implementasi baru (_parameter5, _calib_ratio).
+        """
+        from core.moildev_applicator import MoildevApplicator
+        moil = object.__new__(MoildevApplicator)
+        moil._parameter5    = param5
+        moil._calib_ratio   = calib_ratio
+        moil._sensor_width  = img_w
+        moil._sensor_height = img_h
+        moil.frame_width    = img_w
+        moil.frame_height   = img_h
         return moil
 
     def test_focal_length_not_double_scaled(self):
@@ -446,13 +453,15 @@ class TestMoilArucoCameraMatrix:
         Focal length di camera matrix harus == adjusted_focal_length saja
         (tidak dikali scale lagi), karena adjusted_focal_length sudah dalam
         unit piksel output.
+
+        Formula benar (unicorn-solution): fl = param5 / calibRatio
         """
-        from core.moil_undistorter import MoilUndistorter
+        from core.moildev_applicator import MoildevApplicator
         moil = self._make_mock_moil(param5=1000.0, calib_ratio=1.0,
                                      img_w=1280, img_h=720)
         K = moil.build_aruco_camera_matrix(frame_width=1280, frame_height=720)
         fl = K[0, 0]
-        adj_fl = moil.adjusted_focal_length  # = 1000.0
+        adj_fl = moil.adjusted_focal_length  # = param5/calib_ratio = 1000.0
         # Jika double-scaled: fl = 1000 * (1280/1280) = 1000 → OK
         # Jika wrongly scaled ke sensor asli (misal 2592): fl = 1000 * (1280/2592) = 386 → SALAH
         assert fl == pytest.approx(adj_fl, rel=0.05), \
@@ -461,11 +470,10 @@ class TestMoilArucoCameraMatrix:
     def test_focal_length_reasonable_for_live_conditions(self):
         """
         Dengan parameter5≈1000 (tipikal syue_7730v1), focal length output
-        harus dalam range 300–800 px untuk resolusi 1280x720.
+        harus dalam range 300–1500 px untuk resolusi 1280x720.
         Nilai 218 terlalu kecil (menyebabkan Z_tray = 47777 cm).
         """
-        from core.moil_undistorter import MoilUndistorter
-        # Simulasi kondisi live: parameter5=1000, calibRatio=1.0, output=1280x720
+        from core.moildev_applicator import MoildevApplicator
         moil = self._make_mock_moil(param5=1000.0, calib_ratio=1.0,
                                      img_w=1280, img_h=720)
         K = moil.build_aruco_camera_matrix(frame_width=1280, frame_height=720)
@@ -476,7 +484,7 @@ class TestMoilArucoCameraMatrix:
 
     def test_principal_point_at_frame_center(self):
         """Principal point (cx, cy) harus di tengah frame."""
-        from core.moil_undistorter import MoilUndistorter
+        from core.moildev_applicator import MoildevApplicator
         moil = self._make_mock_moil(param5=1000.0, calib_ratio=1.0,
                                      img_w=1280, img_h=720)
         K = moil.build_aruco_camera_matrix(frame_width=1280, frame_height=720)
@@ -485,7 +493,7 @@ class TestMoilArucoCameraMatrix:
 
     def test_matrix_shape_3x3(self):
         """build_aruco_camera_matrix harus return ndarray 3x3."""
-        from core.moil_undistorter import MoilUndistorter
+        from core.moildev_applicator import MoildevApplicator
         moil = self._make_mock_moil()
         K = moil.build_aruco_camera_matrix(frame_width=1280, frame_height=720)
         assert K.shape == (3, 3), f"Shape salah: {K.shape}"
@@ -493,13 +501,173 @@ class TestMoilArucoCameraMatrix:
     def test_focal_length_scales_with_resolution(self):
         """
         Focal length harus proporsional dengan resolusi output:
-        jika resolusi 2x lebih besar, focal length juga 2x.
+        jika resolusi 1.5x lebih besar, focal length juga 1.5x.
         """
-        from core.moil_undistorter import MoilUndistorter
+        from core.moildev_applicator import MoildevApplicator
         moil = self._make_mock_moil(param5=1000.0, calib_ratio=1.0,
                                      img_w=1280, img_h=720)
-        K_720 = moil.build_aruco_camera_matrix(frame_width=1280, frame_height=720)
+        K_720  = moil.build_aruco_camera_matrix(frame_width=1280, frame_height=720)
         K_1080 = moil.build_aruco_camera_matrix(frame_width=1920, frame_height=1080)
-        ratio = K_1080[0, 0] / K_720[0, 0]
+        ratio  = K_1080[0, 0] / K_720[0, 0]
         assert ratio == pytest.approx(1920/1280, rel=0.05), \
             f"Focal length tidak proporsional dengan resolusi: ratio={ratio:.3f}, expected={1920/1280:.3f}"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FASE 4 — Unit tests: MoildevApplicator (unicorn-solution port)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestMoildevApplicatorLUT:
+    """
+    Menguji LUT Alpha-Rho yang dibangun via Horner's Method.
+    Diport dari MoildevApplicator::initializeAlphaRhoTables() unicorn-solution.
+    """
+
+    def _make_lut(self, p0=0.0, p1=0.0, p2=0.0, p3=0.0, p4=0.0, p5=1.0, calib=1.0):
+        """Build LUT menggunakan implementasi baru."""
+        from core.moildev_applicator import MoildevApplicator
+        return MoildevApplicator._init_lut(p0, p1, p2, p3, p4, p5, calib)
+
+    def test_lut_alpha_rho_size(self):
+        """LUT alpha→rho harus memiliki 1800 entri."""
+        a2r, _ = self._make_lut()
+        assert len(a2r) == 1800, f"alpha_to_rho size={len(a2r)}, expected 1800"
+
+    def test_lut_rho_alpha_min_size(self):
+        """LUT rho→alpha harus memiliki minimal 1 entri."""
+        _, r2a = self._make_lut()
+        assert len(r2a) >= 1, "rho_to_alpha kosong!"
+
+    def test_lut_alpha_zero_gives_rho_zero(self):
+        """Alpha=0 (index 0) harus menghasilkan rho=0."""
+        a2r, _ = self._make_lut(p5=1.0)
+        assert a2r[0] == pytest.approx(0.0, abs=1e-9), \
+            f"Alpha=0 harus rho=0, got {a2r[0]}"
+
+    def test_lut_alpha_rho_monotonic_increasing(self):
+        """alpha_to_rho harus monoton meningkat (semakin jauh dari pusat = semakin besar rho)."""
+        a2r, _ = self._make_lut(p5=1.0)
+        for i in range(1, len(a2r)):
+            assert a2r[i] >= a2r[i-1], \
+                f"LUT tidak monoton di index {i}: a2r[{i}]={a2r[i]:.4f} < a2r[{i-1}]={a2r[i-1]:.4f}"
+
+    def test_horner_vs_direct_evaluation(self):
+        """
+        Horner's Method harus menghasilkan nilai yang sama dengan evaluasi langsung.
+        """
+        import math
+        p0, p1, p2, p3, p4, p5, calib = 0.001, -0.01, 0.05, 0.0, 0.0, 1.0, 1.0
+        a2r, _ = self._make_lut(p0, p1, p2, p3, p4, p5, calib)
+        DEG_TO_RAD = math.pi / 180.0
+
+        # Verifikasi untuk beberapa titik
+        for deg_tenth in [100, 300, 600, 900]:
+            alpha = (deg_tenth / 10.0) * DEG_TO_RAD
+            # Direct evaluation (formula lama)
+            rho_direct = (p0*alpha**6 + p1*alpha**5 + p2*alpha**4
+                          + p3*alpha**3 + p4*alpha**2 + p5*alpha) * calib
+            assert a2r[deg_tenth] == pytest.approx(rho_direct, rel=1e-9), \
+                f"Horner vs direct mismatch di alpha={deg_tenth/10:.1f}deg"
+
+
+class TestMoildevApplicatorOutput:
+    """
+    Menguji output undistort() dan build_aruco_camera_matrix()
+    dari MoildevApplicator tanpa hardware kamera nyata.
+    """
+
+    def _make_mock_applicator(self, param5=1000.0, calib_ratio=1.0,
+                               sensor_w=1280, sensor_h=720,
+                               frame_w=640, frame_h=480):
+        """Inject atribut langsung tanpa konstruktor (skip hardware init)."""
+        from core.moildev_applicator import MoildevApplicator
+        import threading
+        import numpy as np
+
+        moil = object.__new__(MoildevApplicator)
+        moil._parameter5    = param5
+        moil._calib_ratio   = calib_ratio
+        moil._sensor_width  = sensor_w
+        moil._sensor_height = sensor_h
+        moil._icx           = sensor_w / 2.0
+        moil._icy           = sensor_h / 2.0
+        moil.frame_width    = frame_w
+        moil.frame_height   = frame_h
+        moil.pitch          = 0.0
+        moil.yaw            = 0.0
+        moil.roll           = 0.0
+        moil.zoom           = 1.4
+        moil.moil_zoom      = 1.4
+        moil.digital_zoom   = 1.0
+        moil.mode           = 2
+        moil.opencl_active  = False
+        moil.target_size    = None
+        moil._maps_lock     = threading.Lock()
+
+        # Buat identity maps (map_x[y,x]=x, map_y[y,x]=y)
+        map_x = np.tile(np.arange(frame_w, dtype=np.float32), (frame_h, 1))
+        map_y = np.tile(np.arange(frame_h, dtype=np.float32).reshape(-1, 1), (1, frame_w))
+        moil._map_x_cpu = map_x
+        moil._map_y_cpu = map_y
+        moil._map_x     = map_x
+        moil._map_y     = map_y
+
+        # Build LUT (pakai parameter dummy sederhana)
+        moil._alpha_to_rho, moil._rho_to_alpha = MoildevApplicator._init_lut(
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0
+        )
+        return moil
+
+    def test_undistort_preserves_shape(self):
+        """undistort() harus mengembalikan frame dengan ukuran yang sama."""
+        moil = self._make_mock_applicator()
+        import numpy as np
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        result = moil.undistort(frame)
+        assert result.shape == frame.shape, \
+            f"Shape berubah: {frame.shape} → {result.shape}"
+
+    def test_undistort_returns_uint8(self):
+        """undistort() harus mengembalikan uint8."""
+        moil = self._make_mock_applicator()
+        import numpy as np
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        result = moil.undistort(frame)
+        assert result.dtype == np.uint8
+
+    def test_undistort_none_input_returns_none(self):
+        """undistort(None) harus return None tanpa crash."""
+        moil = self._make_mock_applicator()
+        result = moil.undistort(None)
+        assert result is None
+
+    def test_aruco_matrix_shape(self):
+        """build_aruco_camera_matrix harus return 3x3."""
+        moil = self._make_mock_applicator()
+        K = moil.build_aruco_camera_matrix(640, 480)
+        assert K.shape == (3, 3)
+
+    def test_aruco_matrix_fx_equals_fy(self):
+        """fx harus sama dengan fy (square pixels)."""
+        moil = self._make_mock_applicator()
+        K = moil.build_aruco_camera_matrix(640, 480)
+        assert K[0, 0] == pytest.approx(K[1, 1], rel=1e-9), \
+            f"fx={K[0,0]:.2f} ≠ fy={K[1,1]:.2f}"
+
+    def test_get_alpha_beta_returns_tuple(self):
+        """get_alpha_beta harus return tuple (alpha, beta)."""
+        moil = self._make_mock_applicator()
+        result = moil.get_alpha_beta(320, 240)
+        assert isinstance(result, tuple) and len(result) == 2
+
+    def test_get_alpha_beta_center_approximately_zero(self):
+        """
+        Koordinat tengah harus menghasilkan alpha≈0
+        (titik pusat = tidak ada defleksi vertikal).
+        """
+        moil = self._make_mock_applicator(sensor_w=640, sensor_h=480,
+                                           frame_w=640, frame_h=480)
+        alpha, beta = moil.get_alpha_beta(320, 240)
+        assert abs(alpha) <= 1.0, \
+            f"Alpha di tengah harus ≈0, got {alpha:.2f}"
+

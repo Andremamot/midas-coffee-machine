@@ -409,8 +409,8 @@ class TestDataCollectionWindow(Gtk.Window):
             
         json_path = os.path.join(root_dir, '07_midas_aruco_fusion', 'camera_parameters.json')
         try:
-            from core.moil_undistorter import MoilUndistorter
-            self.moil_undistorter = MoilUndistorter(
+            from core.moildev_applicator import MoildevApplicator
+            self.moil_undistorter = MoildevApplicator(
                 json_path=json_path,
                 camera_name=cam_name,
                 pitch=alpha,

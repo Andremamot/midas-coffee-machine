@@ -53,7 +53,7 @@ if _FUSION_DIR not in sys.path:
     sys.path.insert(0, _FUSION_DIR)
 
 try:
-    from core.moil_undistorter import MoilUndistorter
+    from core.moildev_applicator import MoildevApplicator as moil_undistorter
     _HAS_MOIL = True
 except ImportError:
     _HAS_MOIL = False
@@ -829,7 +829,7 @@ Contoh penggunaan:
     moil_undistorter = None
     if args.fisheye:
         if not _HAS_MOIL:
-            print("[ERROR] --fisheye diberikan tapi MoilUndistorter tidak bisa diimport.")
+            print("[ERROR] --fisheye diberikan tapi MoildevApplicator tidak bisa diimport.")
             print("        Pastikan conda env midas-py310 aktif dan folder moildev/ ada.")
             sys.exit(1)
 
@@ -845,14 +845,14 @@ Contoh penggunaan:
         cap_w = args.cap_width
         cap_h = args.cap_height
 
-        print(f"[MOIL] Inisialisasi MoilUndistorter...")
+        print(f"[MOIL] Inisialisasi MoildevApplicator...")
         print(f"[MOIL]   Camera : {args.moil_camera_name}")
         print(f"[MOIL]   Zoom   : {args.moil_zoom}x  Mode: {args.moil_mode}")
         print(f"[MOIL]   Pitch  : {args.moil_pitch}°  Yaw: {args.moil_yaw}°")
         print(f"[MOIL]   Stream : {cap_w}x{cap_h}")
         try:
             import numpy as np  # pastikan np tersedia di scope ini
-            moil_undistorter = MoilUndistorter(
+            moil_undistorter = MoildevApplicator(
                 json_path      = cam_json,
                 camera_name    = args.moil_camera_name,
                 pitch          = args.moil_pitch,
@@ -875,7 +875,7 @@ Contoh penggunaan:
             cy = detector.camera_matrix[1, 2]
             print(f"[MOIL] ✅ ArUco camera matrix di-override: fx={adj_f:.1f}px, cx={cx:.0f}, cy={cy:.0f}")
         except Exception as e:
-            print(f"[ERROR] Gagal inisialisasi MoilUndistorter: {e}")
+            print(f"[ERROR] Gagal inisialisasi MoildevApplicator: {e}")
             sys.exit(1)
     elif args.focal_length is not None:
         # Fisheye tidak aktif, tapi user ingin override focal length biasa

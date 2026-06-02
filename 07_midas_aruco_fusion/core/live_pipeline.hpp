@@ -13,7 +13,7 @@
 
 
 #include "aruco_detector.hpp"
-#include "moil_undistorter.hpp"
+#include "moildev_applicator.hpp"
 #include "gui_fusion.hpp"
 #include <camera/camera.h>
 
@@ -32,7 +32,7 @@
  * @param active_cup_str  Human-readable active cup label (type 5 only)
  * @param screenshot_dir  Directory to save screenshots
  * @param video_dir       Directory to save recorded videos
- * @param moil            MoilUndistorter pointer (nullptr = fisheye disabled)
+ * @param moil            MoildevApplicator pointer (nullptr = fisheye disabled)
  * @param gui             GuiFusion pointer
  * @param no_anypoint     If true, keep fisheye mode but skip anypoint remap
  */
@@ -45,7 +45,7 @@ void run_live_pipeline(Camera*             cam,
                        const std::string&  active_cup_str,
                        const std::string&  screenshot_dir,
                        const std::string&  video_dir,
-                       MoilUndistorter*    moil          = nullptr,
+                       MoildevApplicator*    moil          = nullptr,
                        GuiFusion*          gui           = nullptr,
                        bool                no_anypoint   = false,
                        int                 output_w      = 0,

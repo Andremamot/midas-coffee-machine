@@ -4,7 +4,7 @@ import os
 
 sys.path.append(os.path.abspath("../06_aruco_marker"))
 from aruco_detector import ArucoDetector
-from core.moil_undistorter import MoilUndistorter
+from core.moildev_applicator import MoildevApplicator
 
 cap = cv2.VideoCapture(1)
 if not cap.isOpened():
@@ -26,7 +26,7 @@ if ret:
 
     # Test on undistorted (zoom 1.4)
     h, w = frame.shape[:2]
-    moil = MoilUndistorter(
+    moil = MoildevApplicator(
         json_path="camera_parameters.json",
         camera_name="lrcp_imx586_240_17",
         zoom=1.4,

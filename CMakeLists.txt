@@ -201,7 +201,7 @@ add_executable(run_fusion_cpp
     07_midas_aruco_fusion/core/calibration_routines.cpp
     07_midas_aruco_fusion/core/live_pipeline.cpp
     07_midas_aruco_fusion/core/session_reporter.cpp
-    07_midas_aruco_fusion/core/moil_undistorter.cpp
+    07_midas_aruco_fusion/core/moildev_applicator.cpp
     07_midas_aruco_fusion/core/gui_fusion.cpp
     07_midas_aruco_fusion/core/volume_math.cpp
     06_aruco_marker/aruco_detector.cpp
@@ -215,6 +215,6 @@ target_include_directories(run_fusion_cpp PRIVATE
 target_link_libraries(run_fusion_cpp
     midas_core
     stdc++fs
-    ${CMAKE_SOURCE_DIR}/module/moil/lib/libmoildevren.a
+    ${CMAKE_SOURCE_DIR}/module/moil/lib/libmoildev_cpu.so
     ${GTK3_LIBRARIES}
 )

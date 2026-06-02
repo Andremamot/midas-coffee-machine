@@ -9,7 +9,7 @@
 #include "calibration_routines.hpp"
 #include "height_math.hpp"
 #include "session_reporter.hpp"
-#include "moil_undistorter.hpp"
+#include "moildev_applicator.hpp"
 #include "gui_fusion.hpp"
 #include "volume_math.hpp"
 
@@ -78,6 +78,7 @@ static std::mutex              g_result_mutex;
 static std::condition_variable g_result_cv;
 static InferenceResult         g_shared_result;
 static std::atomic<bool>       g_pipeline_running{true};
+static std::atomic<bool>       g_midas_enabled{false};
 
 /*---------------------------------------------------------------------------*/
 /* Inference Worker Thread                                                    */
@@ -85,7 +86,7 @@ static std::atomic<bool>       g_pipeline_running{true};
 
 void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::json calib_data,
                       double marker_size_cm, std::vector<double> active_poly_Kgeom, double focal_px,
-                      MoilUndistorter* moil, bool no_anypoint, int output_w, int output_h,
+                      MoildevApplicator* moil, bool no_anypoint, int output_w, int output_h,
                       GuiFusion* gui)
 {
     AI* ai = AI::get_instance();
@@ -333,7 +334,7 @@ void run_live_pipeline(Camera*                 cam,
                        const std::string&      active_cup_str,
                        const std::string&      screenshot_dir,
                        const std::string&      video_dir,
-                       MoilUndistorter*        moil,
+                       MoildevApplicator*             moil,
                        GuiFusion*              gui,
                        bool                    no_anypoint,
                        int                     output_w,

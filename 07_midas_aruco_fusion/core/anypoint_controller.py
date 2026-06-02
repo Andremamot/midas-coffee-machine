@@ -23,8 +23,8 @@ class AnypointController:
 
     Parameters
     ----------
-    undistorter : MoilUndistorter
-        Instance MoilUndistorter yang akan dikontrol.
+    undistorter : MoildevApplicator
+        Instance MoildevApplicator yang akan dikontrol.
     sensitivity_deg_per_px : float
         Seberapa banyak derajat berubah per piksel drag (default 0.15°/px).
     zoom_step : float
@@ -88,7 +88,7 @@ class AnypointController:
             self._dirty = True
 
     def reset(self):
-        """Reset ke nilai awal saat MoilUndistorter diinisiasi."""
+        """Reset ke nilai awal saat MoildevApplicator diinisiasi."""
         self._u.update_maps(
             pitch=self._init_pitch,
             yaw=self._init_yaw,
