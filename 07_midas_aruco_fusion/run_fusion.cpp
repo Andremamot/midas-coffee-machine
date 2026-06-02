@@ -477,6 +477,7 @@ int main(int argc, char* argv[])
             active_cup_str,
             "results/live_cam",
             "results/video",
+            args.true_height,       /* fallback jika poly_Kgeom extrapolasi negatif */
             moil_undistorter.get(),
             gui.get(),
             args.no_anypoint,

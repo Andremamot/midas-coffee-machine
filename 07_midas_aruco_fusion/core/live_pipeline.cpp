@@ -58,8 +58,11 @@ struct InferenceResult {
     std::vector<cv::Rect> cup_bboxes;
     std::array<double, 2> cup_heights_ema = {0.0, 0.0};
     std::array<bool, 2>   cup_heights_valid = {false, false};
+    /* cup_diameters: diameter fisik (cm), dihitung di inference thread */
     std::array<double, 2> cup_diameters = {0.0, 0.0};
     std::array<double, 2> cup_volumes   = {0.0, 0.0};
+    /* cup_zrims: z_tray - h_cup (cm), untuk display Z_rim label */
+    std::array<double, 2> cup_zrims     = {0.0, 0.0};
     std::array<bool, 2>   cup_vol_valid = {false, false};
     cv::Mat               last_depth_norm;
     std::vector<ArucoResult> aruco_results;
@@ -86,6 +89,7 @@ static std::atomic<bool>       g_midas_enabled{false};
 
 void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::json calib_data,
                       double marker_size_cm, std::vector<double> active_poly_Kgeom, double focal_px,
+                      double true_height_cm,
                       MoildevApplicator* moil, bool no_anypoint, int output_w, int output_h,
                       GuiFusion* gui)
 {
@@ -107,7 +111,18 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
     std::array<bool, 2>    cup_heights_valid = {false, false};
     std::array<double, 2>  cup_diameters = {0.0, 0.0};
     std::array<double, 2>  cup_volumes   = {0.0, 0.0};
+    std::array<double, 2>  cup_zrims     = {0.0, 0.0};
     std::array<bool, 2>    cup_vol_valid = {false, false};
+
+    /* Self-calibrating K factor:
+     * K = true_height * focal / (z_tray * bbox_h_px)
+     * Dihitung SEKALI dari observasi pertama saat true_height tersedia.
+     * Konstan untuk setup kamera + model YOLO yang sama.
+     * Memungkinkan estimasi tinggi gelas APAPUN secara proporsional:
+     *   h_est = z_tray * (bbox_h / focal) * K_self_calib */
+    double K_self_calib    = 0.0;
+    bool   K_self_ready    = false;
+
     int stats_total_frames = 0;
     int stats_midas_runs   = 0;
     
@@ -142,19 +157,28 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
             cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
             cv::cvtColor(gray, frame, cv::COLOR_GRAY2BGR);
         }
+        /* ── Simpan raw fisheye sebelum undistorsi ────────────────────── */
+        /* raw_frame digunakan untuk referensi; saat ini tidak dikirim ke volume
+         * module (moil_facade dihapus). Frame undistorted dipakai untuk semua
+         * kalkulasi (ArUco, YOLO, rim measurement). */
+        cv::Mat raw_frame;
+        if (moil != nullptr && !no_anypoint) {
+            raw_frame = frame.clone();  // simpan sebelum remap
+        }
+
         /* ── Apply fisheye undistortion (if enabled) ──────────────────── */
         if (moil != nullptr && !no_anypoint) {
             frame = moil->undistort(frame);
 
-            /* Setelah Moildev undistortion, gambar sudah rektifikasi.
-             * dist_coeffs di-zero agar ArUco pose estimation tidak double-compensate.
-             * Camera matrix TIDAK di-override — tetap pakai calibration_params.yml
-             * agar Z_tray akurat. */
-            if (aruco.dist_coeffs.empty() || aruco.dist_coeffs.cols != 5) {
-                aruco.dist_coeffs = cv::Mat::zeros(1, 5, CV_64F);
-            } else {
-                aruco.dist_coeffs.setTo(0);
-            }
+            /* Setelah Moildev undistortion, gambar sudah rektifikasi (pinhole).
+             * 1. dist_coeffs di-zero: tidak ada distorsi residual.
+             * 2. camera_matrix di-update ke effective focal length undistorted frame.
+             *    Effective fl = FOCAL_LENGTH_FOR_ZOOM(250) * zoom_internal
+             *                 = 250 * (param5/250) = param5 ≈ 504px.
+             *    Principal point = center output frame. */
+            aruco.dist_coeffs = cv::Mat::zeros(1, 5, CV_64F);
+            aruco.camera_matrix = moil->build_aruco_camera_matrix(
+                frame.cols, frame.rows);
         }
 
         double now = now_sec();
@@ -169,7 +193,11 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
         } else {
             aruco_frame = frame.clone();
         }
-        cv::threshold(aruco_frame, aruco_frame, 128, 255, cv::THRESH_BINARY);
+        /* JANGAN lakukan global threshold di sini!
+         * Global threshold 128 membunuh ArUco detection pada gambar cerah:
+         * gambar menjadi hampir semua putih sehingga pola marker hilang.
+         * ArUco detector sudah menggunakan adaptive threshold internal — 
+         * cukup berikan gambar grayscale langsung. */
         auto aruco_results = aruco.detect(aruco_frame);
         if (!aruco_results.empty()) {
             BestDistanceResult best = aruco.get_best_distance(aruco_results);
@@ -243,9 +271,64 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
                         if (i < (int)current_cup_bboxes.size()) {
                             const cv::Rect& bbox = current_cup_bboxes[i];
                             if (ctype == 5) {
-                                double dynamic_focal = aruco.camera_matrix.empty() ? focal_px : aruco.camera_matrix.at<double>(0, 0);
                                 height_raw = HeightMath::calc_height_geom(
-                                    z_tray_live, bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height, dynamic_focal, active_poly_Kgeom);
+                                    z_tray_live, bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height,
+                                    focal_px,
+                                    active_poly_Kgeom);
+                                /* DEBUG — print K_live inline untuk verifikasi poly_Kgeom */
+                                if (stats_total_frames % 30 == 1) {
+                                    double k_dbg = 0.0;
+                                    for (const double c : active_poly_Kgeom)
+                                        k_dbg = k_dbg * z_tray_live + c;
+                                    std::cout << "[HEIGHT-DBG] cup=" << i
+                                              << " z=" << z_tray_live
+                                              << " bbox_h=" << bbox.height
+                                              << " focal=" << focal_px
+                                              << " K_live=" << k_dbg
+                                              << " poly_sz=" << active_poly_Kgeom.size()
+                                              << " h_raw=" << height_raw << "\n";
+                                    std::cout.flush();
+                                }
+                                /* FALLBACK: jika poly extrapolasi ke luar range kalibrasi
+                                 * (K_live < 0 → height_raw=0), gunakan Self-calibrating K.
+                                 *
+                                 * K_self_calib di-bootstrap SEKALI dari true_height_cm:
+                                 *   K = true_height * focal / (z_tray * bbox_h)
+                                 * lalu dibekukan. Untuk gelas berbeda ukuran:
+                                 *   h_est = z * (bbox_h / focal) * K_self_calib
+                                 * → proporsional terhadap bbox, bukan hardcoded. */
+                                if (height_raw <= 0.0) {
+                                    const double h_geo = z_tray_live *
+                                        (static_cast<double>(bbox.height) / focal_px);
+                                    /* Bootstrap K dari true_height sekali */
+                                    if (!K_self_ready && true_height_cm > 0.0 && h_geo > 0.0) {
+                                        double K_candidate = true_height_cm / h_geo;
+                                        if (K_candidate > 0.05 && K_candidate < 5.0) {
+                                            K_self_calib = K_candidate;
+                                            K_self_ready = true;
+                                            std::cout << "[K-CALIB] Bootstrap K_self="
+                                                      << K_self_calib
+                                                      << " dari true_height=" << true_height_cm
+                                                      << " z=" << z_tray_live
+                                                      << " bbox_h=" << bbox.height << "\n";
+                                            std::cout.flush();
+                                        }
+                                    }
+                                    /* Estimasi tinggi proporsional (adaptif per bbox_h) */
+                                    if (K_self_ready && h_geo > 0.0) {
+                                        height_raw = h_geo * K_self_calib;
+                                        if (stats_total_frames % 30 == 1) {
+                                            std::cout << "[HEIGHT-EST] cup=" << i
+                                                      << " h_geo=" << h_geo
+                                                      << " K=" << K_self_calib
+                                                      << " h_est=" << height_raw << " cm\n";
+                                            std::cout.flush();
+                                        }
+                                    } else if (true_height_cm > 0.0) {
+                                        /* Belum ter-kalibrasi, fallback hardcoded sementara */
+                                        height_raw = true_height_cm;
+                                    }
+                                }
                             } else if (ctype == 7) {
                                 height_raw = HeightMath::calc_height_analytic(
                                     z_tray_live, bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height,
@@ -263,8 +346,26 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
                             if (cup_heights_valid[i]) {
                                 history_cup_h[i].push_back(cup_heights_ema[i]);
                                 double z_rim_val = std::max(0.0, z_tray_live - cup_heights_ema[i]);
-                                cup_diameters[i] = z_rim_val;
-                                cup_vol_valid[i] = true;
+                                cup_zrims[i] = z_rim_val;
+
+                                /* ── Hitung diameter & volume di inference thread ──
+                                 * Gunakan undistorted frame (sudah diremap) +
+                                 * focal efektif dari moildev camera matrix.
+                                 * Ini lebih akurat daripada display frame (scaled) +
+                                 * focal dari calibration_params.yml. */
+                                if (!frame.empty() && z_rim_val > 0.0) {
+                                    double focal_eff = aruco.camera_matrix.empty()
+                                                       ? focal_px
+                                                       : aruco.camera_matrix.at<double>(0, 0);
+                                    float rim_w_px = VolumeMath::measureRimWidthPx(frame, bbox);
+                                    cup_diameters[i] = VolumeMath::calcDiameter(
+                                        rim_w_px, z_rim_val, focal_eff);
+                                    cup_volumes[i]   = VolumeMath::calcVolume(
+                                        cup_heights_ema[i], cup_diameters[i]);
+                                    cup_vol_valid[i] = true;
+                                } else {
+                                    cup_vol_valid[i] = false;
+                                }
                             } else {
                                 cup_vol_valid[i] = false;
                                 history_cup_h[i].push_back(0.0);
@@ -304,6 +405,7 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
             g_shared_result.cup_heights_valid = cup_heights_valid;
             g_shared_result.cup_diameters = cup_diameters;
             g_shared_result.cup_volumes = cup_volumes;
+            g_shared_result.cup_zrims = cup_zrims;
             g_shared_result.cup_vol_valid = cup_vol_valid;
             if (!current_depth_norm.empty()) {
                 g_shared_result.last_depth_norm = current_depth_norm.clone();
@@ -334,7 +436,8 @@ void run_live_pipeline(Camera*                 cam,
                        const std::string&      active_cup_str,
                        const std::string&      screenshot_dir,
                        const std::string&      video_dir,
-                       MoildevApplicator*             moil,
+                       double                  true_height_cm,
+                       MoildevApplicator*      moil,
                        GuiFusion*              gui,
                        bool                    no_anypoint,
                        int                     output_w,
@@ -367,6 +470,7 @@ void run_live_pipeline(Camera*                 cam,
     std::cout << "[DEBUG-PL] Starting inference thread...\n"; std::cout.flush();
     std::thread inf_thread(inference_worker, cam, &aruco, calib_data,
                            marker_size_cm, active_poly_Kgeom, focal_px,
+                           true_height_cm,
                            moil, no_anypoint, output_w, output_h, gui);
     std::cout << "[DEBUG-PL] Inference thread started\n"; std::cout.flush();
 
@@ -504,21 +608,20 @@ void run_live_pipeline(Camera*                 cam,
                     oss << std::fixed << std::setprecision(1) << res.cup_heights_ema[i] << " cm";
                     cv::putText(disp, lbl, cv::Point((int)(40*S), y_pos-(int)(15*S)), cv::FONT_HERSHEY_SIMPLEX, 0.6 * S, cv::Scalar(200,200,200), 2);
                     cv::putText(disp, oss.str(), cv::Point((int)(115*S), y_pos+(int)(5*S)), cv::FONT_HERSHEY_DUPLEX, 1.3 * S, cv::Scalar(0,255,100), 3);
-                    double z_rim_val = std::max(0.0, res.z_tray_live - res.cup_heights_ema[i]);
+                    /* Z_rim dari inference thread (sudah dihitung dengan h_cup EMA) */
+                    double z_rim_val = (i < 2) ? res.cup_zrims[i]
+                                               : std::max(0.0, res.z_tray_live - res.cup_heights_ema[i]);
                     std::ostringstream oss2;
                     oss2 << "Z_rim: " << std::fixed << std::setprecision(1) << z_rim_val << " cm";
                     cv::putText(disp, oss2.str(), cv::Point((int)(280*S), y_pos-(int)(4*S)), cv::FONT_HERSHEY_SIMPLEX, 0.5 * S, cv::Scalar(100,255,100), 2);
 
                     if (res.cup_vol_valid[i]) {
-                        /* Hitung diameter & volume di display thread menggunakan bbox display frame */
-                        double z_rim_stored = res.cup_diameters[i];  /* z_rim_val yg disimpan inference thread */
-                        /* focal_px tersedia sebagai variabel lokal di run_live_pipeline */
-                        double diameter = 0.0, volume_ml = 0.0;
-                        if (focal_px > 0.0 && i < (int)res.cup_bboxes.size()) {
-                            float rim_w_px = VolumeMath::measureRimWidthPx(disp, res.cup_bboxes[i]);
-                            diameter  = VolumeMath::calcDiameter(rim_w_px, z_rim_stored, focal_px);
-                            volume_ml = VolumeMath::calcVolume(res.cup_heights_ema[i], diameter);
-                        }
+                        /* Diameter & volume sudah dihitung di inference thread
+                         * dengan frame undistorted + focal yang benar.
+                         * Display thread cukup baca nilai yang sudah ada. */
+                        double diameter  = res.cup_diameters[i];
+                        double volume_ml = res.cup_volumes[i];
+
                         std::ostringstream ossD;
                         ossD << "D:" << std::fixed << std::setprecision(1) << diameter << "cm";
                         cv::putText(disp, ossD.str(), cv::Point((int)(395*S), y_pos-(int)(4*S)), cv::FONT_HERSHEY_SIMPLEX, 0.45 * S, cv::Scalar(200,200,255), 2);
