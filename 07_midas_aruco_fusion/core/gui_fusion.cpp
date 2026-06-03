@@ -300,18 +300,25 @@ void GuiFusion::set_status_ai(const std::string& text) {
 }
 
 void GuiFusion::enter_setup_mode(const std::string& calib_name) {
-    if (headless_ || !g_gui_ready.load()) return;
+    if (headless_) return;
+    /* NOTE: g_idle_add() aman sebelum gtk_main() — callback antri di GLib
+     * main loop dan dieksekusi saat gtk_main() mulai.
+     * JANGAN pakai guard g_gui_ready di sini! enter_setup_mode() dipanggil
+     * dari worker_thread SEBELUM gtk_main() start. */
     std::string hint = "Setup mode: adjust exposure & anypoint,\nthen click \u25B6 Start " + calib_name;
+    std::string calib_label = "Mode: Setup - " + calib_name;
     g_idle_add([](gpointer data) -> gboolean {
-        auto p = static_cast<std::pair<GuiFusion*, std::string>*>(data);
+        auto p = static_cast<std::pair<GuiFusion*, std::pair<std::string, std::string>>*>(data);
         if (p->first->alive_) {
             gtk_widget_show(p->first->btn_start_calib_);
             gtk_widget_show(p->first->lbl_setup_hint_);
-            gtk_label_set_text(GTK_LABEL(p->first->lbl_setup_hint_), p->second.c_str());
+            gtk_label_set_text(GTK_LABEL(p->first->lbl_setup_hint_), p->second.first.c_str());
+            gtk_label_set_text(GTK_LABEL(p->first->lbl_status_calib_), p->second.second.c_str());
         }
         delete p;
         return G_SOURCE_REMOVE;
-    }, new std::pair<GuiFusion*, std::string>(this, hint));
+    }, new std::pair<GuiFusion*, std::pair<std::string, std::string>>(
+        this, {hint, calib_label}));
 }
 
 void GuiFusion::wait_for_calibration_ready() {

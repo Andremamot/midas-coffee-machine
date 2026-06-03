@@ -357,12 +357,65 @@ int main(int argc, char* argv[])
                 }
                 gui->enter_setup_mode(cname);
                 std::cout << "[SETUP] Waiting for user to configure camera and start " << cname << " calibration...\n";
-                gui->wait_for_calibration_ready();
+
+                /* Stream kamera ke GUI selama menunggu user tekan "Start Calibration".
+                 * Tanpa ini, GUI kosong dan user tidak bisa lihat kamera untuk
+                 * adjust exposure/anypoint sebelum kalibrasi. */
+                while (!gui->is_calibration_ready() && gui->is_alive()) {
+                    cv::Mat raw = cam.get_frame();
+                    if (!raw.empty()) {
+                        cv::Mat preview = raw;
+                        if (moil_undistorter) {
+                            preview = moil_undistorter->undistort(raw);
+                        }
+                        /* Overlay teks setup mode */
+                        cv::putText(preview,
+                            "SETUP: " + cname + " Calibration",
+                            cv::Point(20, 50),
+                            cv::FONT_HERSHEY_SIMPLEX, 1.2,
+                            cv::Scalar(0, 220, 255), 3);
+                        cv::putText(preview,
+                            "Adjust exposure & anypoint, then click [Start Calibration]",
+                            cv::Point(20, 95),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.65,
+                            cv::Scalar(200, 200, 200), 2);
+                        gui->update_image(preview);
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(33)); // ~30fps
+                }
+                if (!gui->is_alive()) return;  /* user tutup window */
+
             }
 
+            /* Stop camera stream utama agar tidak conflict dengan cap_calib.
+             * Camera class menggunakan VideoCapture internal — membuka camera
+             * index yang sama dari dua VideoCapture sekaligus menyebabkan
+             * frame corrupt atau cap_calib.read() selalu gagal. */
+            cam.stop_camera();
+
             cv::VideoCapture cap_calib(args.camera);
-            cap_calib.set(cv::CAP_PROP_FRAME_WIDTH, 640);
-            cap_calib.set(cv::CAP_PROP_FRAME_HEIGHT, 480);
+            /* KRITIS: Gunakan resolusi penuh yang sama dengan live pipeline.
+             * Python get_frame() juga menggunakan resolusi 2592x1944 + Moildev undistortion.
+             * Kalibrasi dengan 640x480 raw akan menghasilkan bbox_h dan focal yang
+             * berbeda dari saat inferensi → K_geom salah. */
+            cap_calib.set(cv::CAP_PROP_FRAME_WIDTH,  2592);
+            cap_calib.set(cv::CAP_PROP_FRAME_HEIGHT, 1944);
+
+            /* Update aruco.camera_matrix ke focal moildev sebelum kalibrasi,
+             * sama seperti Python run_fusion.py baris 234-239. */
+            if (moil_undistorter) {
+                /* Ambil frame dummy untuk mengetahui resolusi output */
+                cv::Mat dummy_frame;
+                cap_calib.read(dummy_frame);
+                if (!dummy_frame.empty()) {
+                    cv::Mat dummy_undist = moil_undistorter->undistort(dummy_frame);
+                    aruco.camera_matrix = moil_undistorter->build_aruco_camera_matrix(
+                        dummy_undist.cols, dummy_undist.rows);
+                    aruco.dist_coeffs = cv::Mat::zeros(1, 5, CV_64F);
+                    std::cout << "[CALIB] aruco.camera_matrix updated to moildev focal: "
+                              << "fx=" << aruco.camera_matrix.at<double>(0,0) << " px\n";
+                }
+            }
 
             /* Run the selected calibration mode */
             switch (args.calibrate) {
@@ -370,36 +423,43 @@ int main(int argc, char* argv[])
                 case 2:
                     calib_data = CalibRoutines::run_calib_1p_2p(
                         cap_calib, aruco, storage, args.headless,
-                        args.true_height, args.true_height_2, args.calibrate);
+                        args.true_height, args.true_height_2, args.calibrate,
+                        moil_undistorter.get(), gui.get());
                     break;
                 case 3:
                     calib_data = CalibRoutines::run_calib_zgrid(
                         cap_calib, aruco, storage, args.headless,
-                        args.true_height, args.n_positions);
+                        args.true_height, args.n_positions,
+                        moil_undistorter.get(), gui.get());
                     break;
                 case 4:
                     calib_data = CalibRoutines::run_calib_bbox(
-                        cap_calib, aruco, storage, args.headless, args.true_height);
+                        cap_calib, aruco, storage, args.headless, args.true_height,
+                        moil_undistorter.get(), gui.get());
                     break;
                 case 5:
                     calib_data = CalibRoutines::run_calib_geom(
                         cap_calib, aruco, storage, args.headless,
-                        args.true_height, args.n_positions);
+                        args.true_height, args.n_positions,
+                        moil_undistorter.get(), gui.get());
                     break;
                 case 6:
                     calib_data = CalibRoutines::run_calib_bilateral(
                         cap_calib, aruco, storage, args.headless,
-                        args.true_height, args.true_height_2, args.n_positions);
+                        args.true_height, args.true_height_2, args.n_positions,
+                        moil_undistorter.get(), gui.get());
                     break;
                 case 7:
                     calib_data = CalibRoutines::run_calib_analytic(
                         cap_calib, aruco, storage, args.headless,
-                        args.true_height, args.true_height_2);
+                        args.true_height, args.true_height_2,
+                        moil_undistorter.get(), gui.get());
                     break;
                 default:
                     std::cerr << "[ERROR] Unknown calibration mode.\n";
                     if (gui) gui->queue_key(27);
                     return;
+
             }
             cap_calib.release();
 

@@ -157,6 +157,19 @@ public:
     void set_sharpen(float amount);
     float sharpen_amount() const { return sharpen_amount_; }
 
+    /**
+     * @brief Toggle debug output (default: OFF).
+     *
+     * Saat verbose=true, rebuild_maps_() mencetak info diagnostik:
+     *   "[MOIL-DBG] maps rebuilt ..."
+     * Hanya aktifkan saat debugging; JANGAN aktifkan di production
+     * karena melakukan cv::minMaxLoc pada map besar setiap frame.
+     *
+     * @param v  true = aktifkan debug output, false = silent (default)
+     */
+    void set_verbose(bool v) { verbose_ = v; }
+    bool is_verbose()  const { return verbose_; }
+
 private:
     // ── Engine Moildev CPU (libmoildev_cpu.so) ────────────────────────────
     std::unique_ptr<moildev::cpu::Moildev> moil_;
@@ -176,6 +189,11 @@ private:
 
     // ── Sharpening pasca-remap ─────────────────────────────────────────────
     float sharpen_amount_ = 0.0f;
+
+    // ── Verbose/debug flag ────────────────────────────────────────────────
+    // Default false — tidak ada output di production.
+    // Set ke true via set_verbose(true) hanya untuk debugging lokal.
+    bool verbose_ = false;
 
     // ── Remap maps ────────────────────────────────────────────────────────
     cv::Mat map_x_, map_y_;           ///< Float32 maps (source of truth)

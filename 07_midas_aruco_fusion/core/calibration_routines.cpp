@@ -12,6 +12,8 @@
 #include <numeric>
 #include <thread>
 
+#include "poly_fit.hpp"   // ← eliminasi duplikasi Gauss elimination (mode 3,5,6)
+
 /* ── Local time helpers ─────────────────────────────────────────────────── */
 static double now_sec()
 {
@@ -34,6 +36,24 @@ static double vec_mean(const std::vector<double>& v)
 {
     if (v.empty()) return 0.0;
     return std::accumulate(v.begin(), v.end(), 0.0) / v.size();
+}
+
+/*---------------------------------------------------------------------------*/
+/* apply_moil_if_needed                                                       */
+/* Mirrors Python run_fusion.py get_frame() baris 325-346:                   */
+/*   if moil_undistorter is not None:                                         */
+/*       f = moil_undistorter.undistort(f)                                    */
+/*       aruco.camera_matrix = moil_undistorter.build_aruco_camera_matrix()  */
+/* Wajib dipanggil setiap frame selama kalibrasi jika fisheye aktif.          */
+/*---------------------------------------------------------------------------*/
+void CalibRoutines::apply_moil_if_needed(cv::Mat& frame,
+                                          ArucoDetector& aruco,
+                                          MoildevApplicator* moil)
+{
+    if (moil == nullptr) return;
+    frame = moil->undistort(frame);
+    aruco.dist_coeffs   = cv::Mat::zeros(1, 5, CV_64F);
+    aruco.camera_matrix = moil->build_aruco_camera_matrix(frame.cols, frame.rows);
 }
 
 /*---------------------------------------------------------------------------*/
@@ -95,21 +115,57 @@ bool CalibRoutines::get_cup_bbox(const std::vector<Detection>& detections,
 /* Draw helpers                                                               */
 /*---------------------------------------------------------------------------*/
 
+/* draw_status_box — Python-style overlay panel (S=2.5)
+ * Identik dengan Python calibration_routines.py baris 548-568:
+ *   S = 2.5
+ *   panel_w, panel_h = int(535*S), int(105*S)
+ *   cv2.rectangle + cv2.putText dengan scale S */
 static void draw_status_box(cv::Mat& frame,
-                            const std::string& line1,
-                            const std::string& line2,
-                            const std::string& status_line,
-                            cv::Scalar bg_color = {20, 20, 40})
+                             const std::string& line1,
+                             const std::string& line2,
+                             const std::string& status_line,
+                             cv::Scalar bg_color = {20, 20, 40},
+                             cv::Scalar border_color = {0, 220, 120})
 {
-    cv::rectangle(frame, cv::Point(8, 8), cv::Point(535, 100), bg_color, -1);
-    cv::rectangle(frame, cv::Point(8, 8), cv::Point(535, 100),
-                  cv::Scalar(0, 200, 255), 1);
-    cv::putText(frame, line1, cv::Point(18, 30),
-                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 200, 255), 1);
-    cv::putText(frame, line2, cv::Point(18, 58),
-                cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(150, 200, 255), 1);
-    cv::putText(frame, status_line, cv::Point(18, 92),
-                cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(200, 200, 200), 1);
+    constexpr float S    = 2.5f;
+    const int panel_w    = static_cast<int>(535 * S);
+    const int panel_h    = static_cast<int>(105 * S);
+    const cv::Point tl(25, 25);
+    const cv::Point br(25 + panel_w, 25 + panel_h);
+
+    cv::rectangle(frame, tl, br, bg_color, -1);
+    cv::rectangle(frame, tl, br, border_color, 3);
+
+    cv::putText(frame, line1,
+                cv::Point(static_cast<int>(45*S), static_cast<int>(60*S)),
+                cv::FONT_HERSHEY_SIMPLEX, 0.6 * S,
+                cv::Scalar(0, 220, 255), 3);
+    cv::putText(frame, line2,
+                cv::Point(static_cast<int>(45*S), static_cast<int>(90*S)),
+                cv::FONT_HERSHEY_SIMPLEX, 0.5 * S,
+                cv::Scalar(150, 220, 255), 2);
+    cv::putText(frame, status_line,
+                cv::Point(static_cast<int>(45*S), static_cast<int>(115*S)),
+                cv::FONT_HERSHEY_SIMPLEX, 0.45 * S,
+                cv::Scalar(200, 200, 200), 3);
+}
+
+/* display_and_get_key — abstraksi GUI/OpenCV display.
+ * Jika gui != nullptr: kirim ke GTK GuiFusion (tombol Next Step berfungsi).
+ * Jika gui == nullptr dan !headless: fallback ke cv::imshow.
+ * Mengembalikan key code yang ditekan, -1 jika tidak ada. */
+static int display_and_get_key(const cv::Mat& disp,
+                                bool headless,
+                                GuiFusion* gui)
+{
+    if (headless) return -1;
+    if (gui) {
+        gui->update_image(disp);
+        return gui->get_key();
+    }
+    /* Fallback: OpenCV window (headless=false, gui=nullptr) */
+    cv::imshow(WIN, disp);
+    return cv::waitKey(1) & 0xFF;
 }
 
 /*===========================================================================*/
@@ -122,7 +178,9 @@ nlohmann::json CalibRoutines::run_calib_1p_2p(cv::VideoCapture& cap,
                                                bool headless,
                                                double true_height,
                                                double true_height_2,
-                                               int calibrate_mode)
+                                               int calibrate_mode,
+                                               MoildevApplicator* moil,
+                                               GuiFusion* gui)
 {
     constexpr double WARMUP_SEC  = 5.0;
     constexpr double SAMPLE_TIMEOUT = 30.0;
@@ -143,7 +201,7 @@ nlohmann::json CalibRoutines::run_calib_1p_2p(cv::VideoCapture& cap,
     std::cout << "  CALIBRATION " << calibrate_mode << "-POINT\n";
     std::cout << std::string(55, '-') << "\n";
 
-    if (!headless) cv::namedWindow(WIN, cv::WINDOW_NORMAL);
+    /* cv::namedWindow removed — display handled via display_and_get_key() */
 
     while (phase != "done") {
         cv::Mat frame;
@@ -151,6 +209,7 @@ nlohmann::json CalibRoutines::run_calib_1p_2p(cv::VideoCapture& cap,
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
+        apply_moil_if_needed(frame, aruco, moil);
 
         double t       = now_sec();
         double elapsed = t - phase_start;
@@ -254,8 +313,7 @@ nlohmann::json CalibRoutines::run_calib_1p_2p(cv::VideoCapture& cap,
         }
 
         if (!headless) {
-            cv::imshow(WIN, disp);
-            int key = cv::waitKey(1) & 0xFF;
+            int key = display_and_get_key(disp, headless, gui);
             if (key == 27) return nlohmann::json{};  // ESC — abort
             if (phase == "swap_wait" && key == ' ') {
                 phase = "warmup_2"; phase_start = now_sec();
@@ -310,7 +368,9 @@ nlohmann::json CalibRoutines::run_calib_zgrid(cv::VideoCapture& cap,
                                                CalibrationStorage& storage,
                                                bool headless,
                                                double true_height,
-                                               int n_positions)
+                                               int n_positions,
+                                               MoildevApplicator* moil,
+                                               GuiFusion* gui)
 {
     AI* ai = AI::get_instance();
 
@@ -338,6 +398,7 @@ nlohmann::json CalibRoutines::run_calib_zgrid(cv::VideoCapture& cap,
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
+        apply_moil_if_needed(frame, aruco, moil);
 
         double t       = now_sec();
         double elapsed = t - phase_start;
@@ -420,8 +481,7 @@ nlohmann::json CalibRoutines::run_calib_zgrid(cv::VideoCapture& cap,
         }
 
         if (!headless) {
-            cv::imshow(WIN, disp);
-            int key = cv::waitKey(1) & 0xFF;
+            int key = display_and_get_key(disp, headless, gui);
             if (key == 27) return nlohmann::json{};
             if (phase == "swap_wait" && key == ' ') {
                 phase = "warmup"; phase_start = now_sec();
@@ -434,71 +494,15 @@ nlohmann::json CalibRoutines::run_calib_zgrid(cv::VideoCapture& cap,
         return nlohmann::json{};
     }
 
-    /* Polynomial fit: K_i = R_i * (1 - H / Z_i).
-     * We fit K(Z) with degree min(n-1, 2).
-     * Simple implementation: degree 1 if 2 pts, degree 2 if 3+ pts.        */
-    int n_pts = (int)grid_data.size();
-    int deg   = std::min(n_pts - 1, 2);
-
-    /* Vandermonde system for poly fit */
+    /* Polynomial fit: K(Z) = a*Z² + b*Z + c, degree = min(n-1, 2)
+     * Menggunakan poly_fit::fit() — eliminasi duplikasi dari mode 5 & 6.  */
+    int n_pts = static_cast<int>(grid_data.size());
     std::vector<double> Z_pts(n_pts), K_pts(n_pts);
     for (int i = 0; i < n_pts; ++i) {
         Z_pts[i] = grid_data[i].Z;
         K_pts[i] = grid_data[i].R * (1.0 - true_height / grid_data[i].Z);
     }
-
-    /* For degrees 1 or 2 we solve the small normal equations directly */
-    std::vector<double> poly_K;
-    if (deg == 1) {
-        /* Linear fit: K = a*Z + b */
-        double sum_z  = 0, sum_z2 = 0, sum_k = 0, sum_zk = 0;
-        int    n      = n_pts;
-        for (int i = 0; i < n; ++i) {
-            sum_z  += Z_pts[i];
-            sum_z2 += Z_pts[i] * Z_pts[i];
-            sum_k  += K_pts[i];
-            sum_zk += Z_pts[i] * K_pts[i];
-        }
-        double denom = n * sum_z2 - sum_z * sum_z;
-        double a     = (denom != 0) ? (n * sum_zk - sum_z * sum_k) / denom : 0.0;
-        double b     = (sum_k - a * sum_z) / n;
-        poly_K = {a, b};  /* [a, b] for a*Z + b = polyval convention */
-    } else {
-        /* Quadratic fit: K = a*Z^2 + b*Z + c (degree 2) */
-        /* Build 3x3 normal equations */
-        double S[5] = {};  /* S0=n, S1=sum Z, S2=sum Z^2, S3=sum Z^3, S4=sum Z^4 */
-        double T[3] = {};  /* T0=sum K, T1=sum K*Z, T2=sum K*Z^2 */
-        S[0] = n_pts;
-        for (int i = 0; i < n_pts; ++i) {
-            double z = Z_pts[i], k = K_pts[i];
-            S[1] += z; S[2] += z*z; S[3] += z*z*z; S[4] += z*z*z*z;
-            T[0] += k; T[1] += k*z; T[2] += k*z*z;
-        }
-        /* Gauss elimination on 3x3 */
-        double A[3][4] = {
-            {S[0], S[1], S[2], T[0]},
-            {S[1], S[2], S[3], T[1]},
-            {S[2], S[3], S[4], T[2]}
-        };
-        for (int col = 0; col < 3; ++col) {
-            /* Pivot */
-            int pivot = col;
-            for (int r = col+1; r < 3; ++r)
-                if (std::fabs(A[r][col]) > std::fabs(A[pivot][col]))
-                    pivot = r;
-            std::swap(A[col], A[pivot]);
-            if (std::fabs(A[col][col]) < 1e-12) continue;
-            for (int r = 0; r < 3; ++r) {
-                if (r == col) continue;
-                double f = A[r][col] / A[col][col];
-                for (int c2 = col; c2 < 4; ++c2) A[r][c2] -= f * A[col][c2];
-            }
-        }
-        double c_coef = A[2][3] / A[2][2];
-        double b_coef = (A[1][3] - A[1][2]*c_coef) / A[1][1];
-        double a_coef = (A[0][3] - A[0][2]*c_coef - A[0][1]*b_coef) / A[0][0];
-        poly_K = {a_coef, b_coef, c_coef};  /* [a, b, c] for a*Z^2 + b*Z + c */
-    }
+    const auto poly_K = poly_fit::fit(Z_pts, K_pts, /*max_deg=*/2);
 
     storage.save_3p(poly_K, Z_pts, true_height);
     std::cout << "[CALIB] Z-Grid calibration done!\n";
@@ -513,7 +517,9 @@ nlohmann::json CalibRoutines::run_calib_bbox(cv::VideoCapture& cap,
                                               ArucoDetector& aruco,
                                               CalibrationStorage& storage,
                                               bool headless,
-                                              double true_height)
+                                              double true_height,
+                                              MoildevApplicator* moil,
+                                              GuiFusion* gui)
 {
     AI* ai = AI::get_instance();
 
@@ -542,6 +548,7 @@ nlohmann::json CalibRoutines::run_calib_bbox(cv::VideoCapture& cap,
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
+        apply_moil_if_needed(frame, aruco, moil);
         double t = now_sec(), elapsed = t - phase_start;
 
         last_aruco = aruco.detect(frame);
@@ -605,8 +612,7 @@ nlohmann::json CalibRoutines::run_calib_bbox(cv::VideoCapture& cap,
         }
 
         if (!headless) {
-            cv::imshow(WIN, disp);
-            int key = cv::waitKey(1)&0xFF;
+            int key = display_and_get_key(disp, headless, gui);
             if (key == 27) return nlohmann::json{};
             if (phase == "swap_wait" && key == ' ') {
                 phase = "warmup"; phase_start = now_sec();
@@ -648,8 +654,16 @@ nlohmann::json CalibRoutines::run_calib_geom(cv::VideoCapture& cap,
                                               CalibrationStorage& storage,
                                               bool headless,
                                               double true_height,
-                                              int n_positions)
+                                              int n_positions,
+                                              MoildevApplicator* moil,
+                                              GuiFusion* gui)
 {
+    /* focal_length_px berasal dari aruco.camera_matrix.
+     * Jika moil != nullptr, camera_matrix sudah di-update ke focal moildev
+     * sebelum masuk ke sini (via run_fusion.cpp). Di dalam loop,
+     * apply_moil_if_needed akan meng-update lagi setiap frame.
+     * Ini identik dengan Python: focal = aruco.camera_matrix[0,0] setelah
+     * moildev override. */
     AI*    ai       = AI::get_instance();
     double focal_px = aruco.camera_matrix.at<double>(0, 0);
 
@@ -677,6 +691,7 @@ nlohmann::json CalibRoutines::run_calib_geom(cv::VideoCapture& cap,
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
+        apply_moil_if_needed(frame, aruco, moil);
         double t = now_sec(), elapsed = t - phase_start;
 
         last_aruco = aruco.detect(frame);
@@ -733,8 +748,7 @@ nlohmann::json CalibRoutines::run_calib_geom(cv::VideoCapture& cap,
         }
 
         if (!headless) {
-            cv::imshow(WIN, disp);
-            int key = cv::waitKey(1)&0xFF;
+            int key = display_and_get_key(disp, headless, gui);
             if (key == 27) return nlohmann::json{};
             if (phase == "swap_wait" && key == ' ') {
                 phase = "warmup"; phase_start = now_sec();
@@ -756,36 +770,8 @@ nlohmann::json CalibRoutines::run_calib_geom(cv::VideoCapture& cap,
         K_pts[i] = true_height / (grid_data[i].Z * grid_data[i].H_px / focal_px);
     }
 
-    /* Reuse degree logic from mode 3 */
-    int deg = std::min(n_pts - 1, 2);
-    std::vector<double> poly_Kgeom;
-    if (deg == 1) {
-        double sz=0,sz2=0,sk=0,szk=0;
-        for (int i=0;i<n_pts;++i){sz+=Z_pts[i];sz2+=Z_pts[i]*Z_pts[i];
-            sk+=K_pts[i];szk+=Z_pts[i]*K_pts[i];}
-        double d=n_pts*sz2-sz*sz;
-        double a=(d!=0)?(n_pts*szk-sz*sk)/d:0;
-        double b=(sk-a*sz)/n_pts;
-        poly_Kgeom={a,b};
-    } else {
-        double S[5]={},T[3]={};
-        S[0]=n_pts;
-        for(int i=0;i<n_pts;++i){double z=Z_pts[i],k=K_pts[i];
-            S[1]+=z;S[2]+=z*z;S[3]+=z*z*z;S[4]+=z*z*z*z;
-            T[0]+=k;T[1]+=k*z;T[2]+=k*z*z;}
-        double A[3][4]={{S[0],S[1],S[2],T[0]},{S[1],S[2],S[3],T[1]},{S[2],S[3],S[4],T[2]}};
-        for(int col=0;col<3;++col){
-            int piv=col;
-            for(int r=col+1;r<3;++r) if(std::fabs(A[r][col])>std::fabs(A[piv][col])) piv=r;
-            std::swap(A[col],A[piv]);
-            if(std::fabs(A[col][col])<1e-12) continue;
-            for(int r=0;r<3;++r){if(r==col)continue;double f=A[r][col]/A[col][col];
-                for(int c2=col;c2<4;++c2) A[r][c2]-=f*A[col][c2];}}
-        double cc=A[2][3]/A[2][2];
-        double bc=(A[1][3]-A[1][2]*cc)/A[1][1];
-        double ac=(A[0][3]-A[0][2]*cc-A[0][1]*bc)/A[0][0];
-        poly_Kgeom={ac,bc,cc};
-    }
+    /* K_geom(Z) fit, degree = min(n-1, 2), via poly_fit::fit() */
+    const auto poly_Kgeom = poly_fit::fit(Z_pts, K_pts, /*max_deg=*/2);
 
     storage.save_5p(poly_Kgeom, Z_pts, true_height);
     std::cout << "[CALIB] Geometric Z-Grid done!\n";
@@ -802,7 +788,9 @@ nlohmann::json CalibRoutines::run_calib_bilateral(cv::VideoCapture& cap,
                                                    bool headless,
                                                    double true_height,
                                                    double true_height_2,
-                                                   int n_positions)
+                                                   int n_positions,
+                                                   MoildevApplicator* moil,
+                                                   GuiFusion* gui)
 {
     AI* ai = AI::get_instance();
 
@@ -829,6 +817,7 @@ nlohmann::json CalibRoutines::run_calib_bilateral(cv::VideoCapture& cap,
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
+        apply_moil_if_needed(frame, aruco, moil);
         double t = now_sec(), elapsed = t - phase_start;
 
         last_aruco = aruco.detect(frame);
@@ -916,8 +905,7 @@ nlohmann::json CalibRoutines::run_calib_bilateral(cv::VideoCapture& cap,
         }
 
         if (!headless) {
-            cv::imshow(WIN, disp);
-            int key = cv::waitKey(1)&0xFF;
+            int key = display_and_get_key(disp, headless, gui);
             if (key == 27) return nlohmann::json{};
             if (key == ' ') {
                 if (phase == "swap_c2") { phase = "warmup_c2"; phase_start = now_sec(); }
@@ -926,44 +914,12 @@ nlohmann::json CalibRoutines::run_calib_bilateral(cv::VideoCapture& cap,
         }
     }
 
-    /* Fit poly_m(Z) and poly_c(Z) */
-    int n_pts = (int)Z_pts.size();
+    /* Fit poly_m(Z) and poly_c(Z) via poly_fit::fit() */
+    const int n_pts = static_cast<int>(Z_pts.size());
     if (n_pts < 1) { std::cerr << "[CALIB] No bilateral data.\n"; return nlohmann::json{}; }
 
-    auto fit_poly = [&](const std::vector<double>& Y) -> std::vector<double> {
-        int deg2 = std::min(n_pts-1, 2);
-        if (deg2 == 0) return {Y[0]};
-        if (deg2 == 1) {
-            double sz=0,sz2=0,sy=0,szy=0;
-            for(int i=0;i<n_pts;++i){sz+=Z_pts[i];sz2+=Z_pts[i]*Z_pts[i];
-                sy+=Y[i];szy+=Z_pts[i]*Y[i];}
-            double d=n_pts*sz2-sz*sz;
-            double a=(d!=0)?(n_pts*szy-sz*sy)/d:0;
-            double b=(sy-a*sz)/n_pts;
-            return {a,b};
-        }
-        /* quad */
-        double S[5]={},T[3]={};
-        S[0]=n_pts;
-        for(int i=0;i<n_pts;++i){double z=Z_pts[i],y=Y[i];
-            S[1]+=z;S[2]+=z*z;S[3]+=z*z*z;S[4]+=z*z*z*z;
-            T[0]+=y;T[1]+=y*z;T[2]+=y*z*z;}
-        double A[3][4]={{S[0],S[1],S[2],T[0]},{S[1],S[2],S[3],T[1]},{S[2],S[3],S[4],T[2]}};
-        for(int col=0;col<3;++col){
-            int piv=col;
-            for(int r=col+1;r<3;++r) if(std::fabs(A[r][col])>std::fabs(A[piv][col])) piv=r;
-            std::swap(A[col],A[piv]);
-            if(std::fabs(A[col][col])<1e-12) continue;
-            for(int r=0;r<3;++r){if(r==col)continue;double f=A[r][col]/A[col][col];
-                for(int c2=col;c2<4;++c2)A[r][c2]-=f*A[col][c2];}}
-        double cc=A[2][3]/A[2][2];
-        double bc=(A[1][3]-A[1][2]*cc)/A[1][1];
-        double ac=(A[0][3]-A[0][2]*cc-A[0][1]*bc)/A[0][0];
-        return {ac,bc,cc};
-    };
-
-    auto poly_m = fit_poly(m_pts);
-    auto poly_c = fit_poly(c_pts);
+    const auto poly_m = poly_fit::fit(Z_pts, m_pts, /*max_deg=*/2);
+    const auto poly_c = poly_fit::fit(Z_pts, c_pts, /*max_deg=*/2);
 
     storage.save_6p(poly_m, poly_c, Z_pts, true_height, true_height_2);
     std::cout << "[CALIB] Bilateral Z-Grid done!\n";
@@ -979,7 +935,9 @@ nlohmann::json CalibRoutines::run_calib_analytic(cv::VideoCapture& cap,
                                                   CalibrationStorage& storage,
                                                   bool headless,
                                                   double true_height,
-                                                  double true_height_2)
+                                                  double true_height_2,
+                                                  MoildevApplicator* moil,
+                                                  GuiFusion* gui)
 {
     AI* ai = AI::get_instance();
 
@@ -1002,6 +960,7 @@ nlohmann::json CalibRoutines::run_calib_analytic(cv::VideoCapture& cap,
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
+        apply_moil_if_needed(frame, aruco, moil);
         double t = now_sec(), elapsed = t - phase_start;
 
         last_aruco = aruco.detect(frame);
@@ -1087,8 +1046,7 @@ nlohmann::json CalibRoutines::run_calib_analytic(cv::VideoCapture& cap,
         }
 
         if (!headless) {
-            cv::imshow(WIN, disp);
-            int key = cv::waitKey(1)&0xFF;
+            int key = display_and_get_key(disp, headless, gui);
             if (key == 27) return nlohmann::json{};
             if (phase == "swap" && key == ' ') {
                 phase = "warmup_2"; phase_start = now_sec();

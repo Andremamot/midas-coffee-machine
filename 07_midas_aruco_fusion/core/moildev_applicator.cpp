@@ -336,18 +336,20 @@ void MoildevApplicator::rebuild_maps_()
     float zoom_internal = zoom_ * natural_zoom;
 
 
-    std::cout << "[MOIL-DBG] zoom_user=" << zoom_
-              << " natural_zoom=" << natural_zoom
-              << " zoom_internal=" << zoom_internal
-              << " (param5=" << param5_ << "/250)\n";
-    std::cout.flush();
+    // ── Debug: zoom internals (hanya saat verbose=true) ──────────────────
+    if (verbose_) {
+        std::cout << "[MOIL-DBG] zoom_user=" << zoom_
+                  << " natural_zoom=" << natural_zoom
+                  << " zoom_internal=" << zoom_internal
+                  << " (param5=" << param5_ << "/250)\n";
+        std::cout.flush();
+    }
 
     moil_->AnyPointM2(mx_ptr, my_ptr, pitch_, yaw_, zoom_internal);
 
-    // ── DEBUG: verifikasi nilai map yang dihasilkan moildev ───────────────
-    // Map values harus dalam range [0, W] x [0, H].
-    // Jika NaN, Inf, atau di luar range → library memberikan map yang salah.
-    {
+    // ── Debug: verifikasi nilai map (hanya saat verbose=true) ────────────
+    // cv::minMaxLoc pada map besar (1280×720) = O(W×H) → jangan di production!
+    if (verbose_) {
         float cx_map = native_x.at<float>(nativeH/2, nativeW/2);
         float cy_map = native_y.at<float>(nativeH/2, nativeW/2);
         float tl_x   = native_x.at<float>(0, 0);

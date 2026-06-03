@@ -8,10 +8,15 @@
 # nlohmann_json telah terinstall via:
 #   sudo pacman -S nlohmann-json
 #
-# Cara build:
+# Cara build (library):
 #   cd 07_midas_aruco_fusion
 #   cmake -B build/cmake -DCMAKE_BUILD_TYPE=Release
 #   cmake --build build/cmake -j$(nproc)
+#
+# Cara build + test (x86, tanpa hardware ARM):
+#   cmake -B build/cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTS=ON
+#   cmake --build build/cmake -j$(nproc)
+#   ctest --test-dir build/cmake --output-on-failure
 ##############################################################################
 
 cmake_minimum_required(VERSION 3.18)
@@ -138,3 +143,91 @@ message(STATUS "  nlohmann_json : OK (pacman)")
 message(STATUS "  moildev_cpu   : ${MOILDEV_LIB}")
 message(STATUS "  Output dir    : ${PROJ_ROOT}/lib")
 message(STATUS "")
+
+# ── Unit Tests (x86 only, tidak butuh ARM hardware) ─────────────────────────
+# Aktifkan dengan: cmake -DBUILD_TESTS=ON
+# Hanya berjalan di x86_64 — pure math logic tanpa DRP-AI / moildev_cpu
+option(BUILD_TESTS "Build standalone C++ unit tests (x86 only)" OFF)
+
+if(BUILD_TESTS)
+    if(IS_ARM_TARGET)
+        message(WARNING "[TEST] BUILD_TESTS hanya untuk x86 development. Dinonaktifkan di ARM.")
+    else()
+        enable_testing()
+        message(STATUS "[TEST] Membangun unit tests (x86 mode)...")
+
+        # ── Common compile flags untuk semua test ─────────────────────────
+        set(TEST_COMPILE_FLAGS -Wall -Wextra -O2 -DNDEBUG)
+
+        # ── test_height_math ─────────────────────────────────────────────
+        add_executable(test_height_math
+            tests/test_height_math.cpp
+            core/height_math.cpp
+        )
+        target_include_directories(test_height_math PRIVATE
+            "${PROJ_ROOT}"
+            "${PROJ_ROOT}/core"
+        )
+        target_link_libraries(test_height_math PRIVATE ${OpenCV_LIBS})
+        target_compile_options(test_height_math PRIVATE ${TEST_COMPILE_FLAGS})
+        set_target_properties(test_height_math PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${PROJ_ROOT}/build/tests"
+        )
+        add_test(NAME HeightMath COMMAND test_height_math)
+        message(STATUS "  [TEST] test_height_math: OK")
+
+        # ── test_volume_math ─────────────────────────────────────────────
+        add_executable(test_volume_math
+            tests/test_volume_math.cpp
+            core/volume_math.cpp
+        )
+        target_include_directories(test_volume_math PRIVATE
+            "${PROJ_ROOT}"
+            "${PROJ_ROOT}/core"
+        )
+        target_link_libraries(test_volume_math PRIVATE ${OpenCV_LIBS})
+        target_compile_options(test_volume_math PRIVATE ${TEST_COMPILE_FLAGS})
+        set_target_properties(test_volume_math PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${PROJ_ROOT}/build/tests"
+        )
+        add_test(NAME VolumeMath COMMAND test_volume_math)
+        message(STATUS "  [TEST] test_volume_math: OK")
+
+        # ── test_calib_poly (header-only poly_fit.hpp) ────────────────────
+        # Tidak butuh .cpp tambahan — poly_fit.hpp adalah header-only
+        add_executable(test_calib_poly
+            tests/test_calib_poly.cpp
+        )
+        target_include_directories(test_calib_poly PRIVATE
+            "${PROJ_ROOT}"
+            "${PROJ_ROOT}/core"
+        )
+        target_compile_options(test_calib_poly PRIVATE ${TEST_COMPILE_FLAGS})
+        set_target_properties(test_calib_poly PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${PROJ_ROOT}/build/tests"
+        )
+        add_test(NAME CalibPoly COMMAND test_calib_poly)
+        message(STATUS "  [TEST] test_calib_poly: OK")
+
+        # ── test_moildev_math (standalone math, tanpa moildev_cpu.so) ────
+        add_executable(test_moildev_math
+            tests/test_moildev_math.cpp
+        )
+        target_include_directories(test_moildev_math PRIVATE
+            "${PROJ_ROOT}"
+            "${PROJ_ROOT}/core"
+        )
+        target_link_libraries(test_moildev_math PRIVATE ${OpenCV_LIBS})
+        target_compile_options(test_moildev_math PRIVATE ${TEST_COMPILE_FLAGS})
+        set_target_properties(test_moildev_math PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${PROJ_ROOT}/build/tests"
+        )
+        add_test(NAME MoildevMath COMMAND test_moildev_math)
+        message(STATUS "  [TEST] test_moildev_math: OK")
+
+        message(STATUS "")
+        message(STATUS "  Jalankan semua test: ctest --test-dir build/cmake --output-on-failure")
+        message(STATUS "")
+    endif()
+endif()
+

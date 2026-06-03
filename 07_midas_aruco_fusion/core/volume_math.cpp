@@ -51,13 +51,17 @@ float measureRimWidthPx(const cv::Mat& frame, const cv::Rect& bbox)
     cv::Mat mask;
     cv::threshold(gray_strip, mask, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
 
-    // Cari kolom paling kiri dan kanan yang memiliki piksel aktif
+    // Proyeksikan mask ke sumbu kolom (1 baris hasil) dengan satu operasi reduce.
+    // cv::reduce + REDUCE_MAX: kolom dengan piksel aktif (>0) → nilai 255.
+    // Ini O(W×H) single-pass, jauh lebih cepat dari O(H) × W calls.
+    cv::Mat col_max;
+    cv::reduce(mask, col_max, 0, cv::REDUCE_MAX, CV_8U);  // 1×W matrix
+
     int left_col  = -1;
     int right_col = -1;
-    for (int col = 0; col < mask.cols; ++col) {
-        // Cek apakah ada piksel non-zero di kolom ini
-        cv::Mat col_data = mask.col(col);
-        if (cv::countNonZero(col_data) > 0) {
+    const uchar* row = col_max.ptr<uchar>(0);
+    for (int col = 0; col < col_max.cols; ++col) {
+        if (row[col] > 0) {
             if (left_col < 0) left_col = col;
             right_col = col;
         }

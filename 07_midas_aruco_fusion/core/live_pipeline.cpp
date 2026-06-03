@@ -114,14 +114,8 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
     std::array<double, 2>  cup_zrims     = {0.0, 0.0};
     std::array<bool, 2>    cup_vol_valid = {false, false};
 
-    /* Self-calibrating K factor:
-     * K = true_height * focal / (z_tray * bbox_h_px)
-     * Dihitung SEKALI dari observasi pertama saat true_height tersedia.
-     * Konstan untuk setup kamera + model YOLO yang sama.
-     * Memungkinkan estimasi tinggi gelas APAPUN secara proporsional:
-     *   h_est = z_tray * (bbox_h / focal) * K_self_calib */
-    double K_self_calib    = 0.0;
-    bool   K_self_ready    = false;
+    /* Self-calibrating K factor — dihapus. Fix focal_px sync ke moildev
+     * (504.7px) sudah membuat poly_Kgeom bekerja dengan benar. */
 
     int stats_total_frames = 0;
     int stats_midas_runs   = 0;
@@ -130,6 +124,14 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
     std::vector<double> history_z_tray;
     std::map<int, std::vector<double>> history_cup_h = {{0, {}}, {1, {}}};
     std::vector<int> history_frames;
+
+    /* Optimasi: buat CLAHE sekali, reuse setiap frame (hindari heap alloc per-frame) */
+    cv::Ptr<cv::CLAHE> clahe_engine = cv::createCLAHE(2.0, cv::Size(8, 8));
+
+    /* Cap history agar tidak tumbuh tak terbatas dalam sesi panjang.
+     * 3600 frame ≈ 1 jam pada 1 Hz data (frekuensi tipikal inference).
+     * Jika overflow, buang elemen terlama (sliding window). */
+    constexpr int MAX_HISTORY = 3600;
 
     while (g_pipeline_running) {
         cv::Mat frame = cam->get_frame();
@@ -145,8 +147,7 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
             cv::cvtColor(frame, ycrcb, cv::COLOR_BGR2YCrCb);
             std::vector<cv::Mat> ch;
             cv::split(ycrcb, ch);
-            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
-            clahe->apply(ch[0], ch[0]);
+            clahe_engine->apply(ch[0], ch[0]);  // reuse cached CLAHE object
             cv::merge(ch, ycrcb);
             cv::cvtColor(ycrcb, frame, cv::COLOR_YCrCb2BGR);
         }
@@ -179,7 +180,25 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
             aruco.dist_coeffs = cv::Mat::zeros(1, 5, CV_64F);
             aruco.camera_matrix = moil->build_aruco_camera_matrix(
                 frame.cols, frame.rows);
-        }
+
+            /* KRITIS: Sinkronkan focal_px dengan effective focal moildev.
+             * Python run_fusion.py baris 346: aruco.camera_matrix di-update tiap frame
+             * SEBELUM frame dipass ke kalibrasi/pipeline.
+             * Oleh karena itu, poly_Kgeom di-fit dengan focal = focal_moildev (504.7px),
+             * bukan focal dari calibration_params.yml (660.773px).
+             * Tanpa sync ini, K_live = H/(z * bbox_h / 660.773) → SALAH.
+             * Dengan sync: K_live = H/(z * bbox_h / 504.7) → sesuai kalibrasi. */
+            if (!aruco.camera_matrix.empty()) {
+                const double focal_new = aruco.camera_matrix.at<double>(0, 0);
+                if (stats_total_frames == 1) {
+                    std::cout << "[FOCAL-SYNC] focal updated: "
+                              << focal_px << " → " << focal_new
+                              << " px (moildev effective, sesuai kalibrasi Python)\n";
+                    std::cout.flush();
+                }
+                focal_px = focal_new;  /* sync setiap frame — zoom bisa berubah */
+            }
+        }  /* end if (moil != nullptr && !no_anypoint) */
 
         double now = now_sec();
         stats_total_frames++;
@@ -290,45 +309,21 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
                                     std::cout.flush();
                                 }
                                 /* FALLBACK: jika poly extrapolasi ke luar range kalibrasi
-                                 * (K_live < 0 → height_raw=0), gunakan Self-calibrating K.
-                                 *
-                                 * K_self_calib di-bootstrap SEKALI dari true_height_cm:
-                                 *   K = true_height * focal / (z_tray * bbox_h)
-                                 * lalu dibekukan. Untuk gelas berbeda ukuran:
-                                 *   h_est = z * (bbox_h / focal) * K_self_calib
-                                 * → proporsional terhadap bbox, bukan hardcoded. */
-                                if (height_raw <= 0.0) {
-                                    const double h_geo = z_tray_live *
-                                        (static_cast<double>(bbox.height) / focal_px);
-                                    /* Bootstrap K dari true_height sekali */
-                                    if (!K_self_ready && true_height_cm > 0.0 && h_geo > 0.0) {
-                                        double K_candidate = true_height_cm / h_geo;
-                                        if (K_candidate > 0.05 && K_candidate < 5.0) {
-                                            K_self_calib = K_candidate;
-                                            K_self_ready = true;
-                                            std::cout << "[K-CALIB] Bootstrap K_self="
-                                                      << K_self_calib
-                                                      << " dari true_height=" << true_height_cm
-                                                      << " z=" << z_tray_live
-                                                      << " bbox_h=" << bbox.height << "\n";
-                                            std::cout.flush();
-                                        }
-                                    }
-                                    /* Estimasi tinggi proporsional (adaptif per bbox_h) */
-                                    if (K_self_ready && h_geo > 0.0) {
-                                        height_raw = h_geo * K_self_calib;
-                                        if (stats_total_frames % 30 == 1) {
-                                            std::cout << "[HEIGHT-EST] cup=" << i
-                                                      << " h_geo=" << h_geo
-                                                      << " K=" << K_self_calib
-                                                      << " h_est=" << height_raw << " cm\n";
-                                            std::cout.flush();
-                                        }
-                                    } else if (true_height_cm > 0.0) {
-                                        /* Belum ter-kalibrasi, fallback hardcoded sementara */
-                                        height_raw = true_height_cm;
-                                    }
+                                 * (K_live < 0 → height_raw=0).
+                                 * Dengan focal_px sudah di-sync ke moildev (504.7px),
+                                 * K_live seharusnya positif jika z_tray dalam range kalibrasi.
+                                 * Jika masih negatif → re-kalibrasi diperlukan di range z_tray saat ini. */
+                                if (height_raw <= 0.0 && stats_total_frames % 30 == 1) {
+                                    double k_chk = 0.0;
+                                    for (const double c : active_poly_Kgeom)
+                                        k_chk = k_chk * z_tray_live + c;
+                                    std::cout << "[HEIGHT-WARN] cup=" << i
+                                              << " K_live=" << k_chk
+                                              << " (negatif: z_tray=" << z_tray_live
+                                              << " di luar range kalibrasi)\n";
+                                    std::cout.flush();
                                 }
+
                             } else if (ctype == 7) {
                                 height_raw = HeightMath::calc_height_analytic(
                                     z_tray_live, bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height,
@@ -344,6 +339,9 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
                                 }
                             }
                             if (cup_heights_valid[i]) {
+                                // Cap history — slide window jika penuh
+                                if ((int)history_cup_h[i].size() >= MAX_HISTORY)
+                                    history_cup_h[i].erase(history_cup_h[i].begin());
                                 history_cup_h[i].push_back(cup_heights_ema[i]);
                                 double z_rim_val = std::max(0.0, z_tray_live - cup_heights_ema[i]);
                                 cup_zrims[i] = z_rim_val;
@@ -368,13 +366,21 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
                                 }
                             } else {
                                 cup_vol_valid[i] = false;
+                                if ((int)history_cup_h[i].size() >= MAX_HISTORY)
+                                    history_cup_h[i].erase(history_cup_h[i].begin());
                                 history_cup_h[i].push_back(0.0);
                             }
                         } else {
                             cup_heights_valid[i] = false;
                             cup_vol_valid[i]     = false;
+                            if ((int)history_cup_h[i].size() >= MAX_HISTORY)
+                                history_cup_h[i].erase(history_cup_h[i].begin());
                             history_cup_h[i].push_back(0.0);
                         }
+                    }
+                    if ((int)history_z_tray.size() >= MAX_HISTORY) {
+                        history_z_tray.erase(history_z_tray.begin());
+                        history_frames.erase(history_frames.begin());
                     }
                     history_z_tray.push_back(z_tray_live);
                     history_frames.push_back(stats_total_frames);
@@ -384,7 +390,13 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
                 for (int i = 0; i < 2; ++i) {
                     cup_heights_valid[i] = false;
                     cup_vol_valid[i] = false;
+                    if ((int)history_cup_h[i].size() >= MAX_HISTORY)
+                        history_cup_h[i].erase(history_cup_h[i].begin());
                     history_cup_h[i].push_back(0.0);
+                }
+                if ((int)history_z_tray.size() >= MAX_HISTORY) {
+                    history_z_tray.erase(history_z_tray.begin());
+                    history_frames.erase(history_frames.begin());
                 }
                 history_z_tray.push_back(z_tray_live);
                 history_frames.push_back(stats_total_frames);
@@ -414,10 +426,14 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
             g_shared_result.stats_total_frames = stats_total_frames;
             g_shared_result.stats_midas_runs = stats_midas_runs;
             
-            /* Sync history for final report */
-            g_shared_result.history_z_tray = history_z_tray;
-            g_shared_result.history_cup_h = history_cup_h;
-            g_shared_result.history_frames = history_frames;
+            /* Sync history untuk session report — hanya saat ada data baru.
+             * Ini mencegah copy vector besar setiap frame di display loop.
+             * History hanya dibutuhkan di akhir pipeline untuk generate laporan. */
+            if (!history_z_tray.empty()) {
+                g_shared_result.history_z_tray = history_z_tray;
+                g_shared_result.history_cup_h  = history_cup_h;
+                g_shared_result.history_frames  = history_frames;
+            }
         }
         g_result_cv.notify_one();
     }
@@ -451,28 +467,38 @@ void run_live_pipeline(Camera*                 cam,
     std::cout << "[DEBUG-PL] focal_px=" << focal_px << "\n"; std::cout.flush();
 
     int ctype = calib_data.value("type", 1);
+#ifndef NDEBUG
     std::cout << "[DEBUG-PL] ctype=" << ctype << "\n"; std::cout.flush();
+#endif
 
     if (gui && !headless) {
         std::cout << "[GUI] Connected to GTK interface.\n";
     }
 
     /* Reset shared state */
+#ifndef NDEBUG
     std::cout << "[DEBUG-PL] Resetting shared state...\n"; std::cout.flush();
+#endif
     {
         std::lock_guard<std::mutex> lock(g_result_mutex);
         g_shared_result = InferenceResult();
         g_pipeline_running = true;
     }
+#ifndef NDEBUG
     std::cout << "[DEBUG-PL] Shared state reset OK\n"; std::cout.flush();
+#endif
 
     /* Start Inference Thread */
+#ifndef NDEBUG
     std::cout << "[DEBUG-PL] Starting inference thread...\n"; std::cout.flush();
+#endif
     std::thread inf_thread(inference_worker, cam, &aruco, calib_data,
                            marker_size_cm, active_poly_Kgeom, focal_px,
                            true_height_cm,
                            moil, no_anypoint, output_w, output_h, gui);
+#ifndef NDEBUG
     std::cout << "[DEBUG-PL] Inference thread started\n"; std::cout.flush();
+#endif
 
     /* Recording state */
     bool              is_recording = false;
@@ -483,6 +509,9 @@ void run_live_pipeline(Camera*                 cam,
     double fps_display      = 0.0;
     int    fps_frame_count  = 0;
     double fps_last_time    = now_sec();
+
+    /* Optimasi: buat CLAHE display sekali di luar loop (hindari heap alloc per-frame) */
+    cv::Ptr<cv::CLAHE> display_clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
 
     try {
         while (g_pipeline_running) {
@@ -498,8 +527,7 @@ void run_live_pipeline(Camera*                 cam,
                 cv::cvtColor(frame, ycrcb, cv::COLOR_BGR2YCrCb);
                 std::vector<cv::Mat> ch;
                 cv::split(ycrcb, ch);
-                cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
-                clahe->apply(ch[0], ch[0]);
+                display_clahe->apply(ch[0], ch[0]);  // reuse cached CLAHE
                 cv::merge(ch, ycrcb);
                 cv::cvtColor(ycrcb, frame, cv::COLOR_YCrCb2BGR);
             }
