@@ -267,8 +267,16 @@ float MoildevApplicator::adjusted_focal_length() const
 }
 
 // ── build_aruco_camera_matrix ─────────────────────────────────────────────────
-// Menggunakan adjusted_focal_length() yang benar.
-// Principal point di tengah frame output.
+// Focal untuk ArUco = param5/calibRatio × zoom_
+//
+// Alasan: Moildev zoom meregangkan pusat fisheye ke seluruh frame output.
+// Dengan zoom=2, object tampak 2× lebih besar dalam piksel.
+// ArUco solvePnP membutuhkan focal yang sesuai dengan besaran piksel itu.
+// Formula: fl = (param5/calibRatio) × zoom × scale_frame
+//
+// Tanpa zoom: ArUco melihat marker 2× besar → estimasi jarak 2× lebih kecil.
+// Contoh: zoom=2, z_real=15cm → z_aruco=7.5cm (SALAH)
+// Dengan zoom: z_aruco=15cm (BENAR)
 
 cv::Mat MoildevApplicator::build_aruco_camera_matrix(int frame_width,
                                                int frame_height) const
@@ -278,9 +286,17 @@ cv::Mat MoildevApplicator::build_aruco_camera_matrix(int frame_width,
     double scale_y = static_cast<double>(frame_height) / static_cast<double>(output_h_);
     double scale   = (scale_x + scale_y) / 2.0;
 
-    double fl = static_cast<double>(adjusted_focal_length()) * scale;
+    /* Sertakan zoom_ factor: saat zoom=2, object 2× lebih besar di image,
+     * sehingga focal efektif untuk ArUco distance estimation juga 2× lebih besar. */
+    double fl = static_cast<double>(adjusted_focal_length()) * scale * static_cast<double>(zoom_);
     double cx = static_cast<double>(frame_width)  / 2.0;
     double cy = static_cast<double>(frame_height) / 2.0;
+
+    std::cout << "[MOIL] build_aruco_camera_matrix:"
+              << " param5/calibRatio=" << adjusted_focal_length()
+              << " zoom=" << zoom_
+              << " scale=" << scale
+              << " -> fl=" << fl << " px\n";
 
     cv::Mat K = (cv::Mat_<double>(3, 3)
         << fl, 0., cx,

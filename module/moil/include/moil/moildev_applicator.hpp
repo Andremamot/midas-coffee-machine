@@ -1,198 +1,222 @@
-/**
- * @file moildev_applicator.hpp
- * @brief Defines the MoildevApplicator singleton class for high-level Moildev operations.
- * @details This header file declares the `MoildevApplicator` class, which serves as a high-level
- * manager for the core `Moildev` library. It handles loading camera parameters, initializing the
- * `Moildev` engine, and provides an interface to generate and manage remapping matrices (maps).
- */
-#ifndef MOILDEV_APPLICATOR_HPP
-#define MOILDEV_APPLICATOR_HPP
+/*******************************************************************************
+ * core/moildev_applicator.hpp
+ *
+ * Fisheye undistortion engine — diport dari MoildevApplicator (unicorn-solution).
+ *
+ * Keunggulan vs implementasi lama:
+ *   - LUT Alpha-Rho via Horner's Method (jauh lebih cepat dari pow())
+ *   - getAlphaBeta(x,y) — konversi koordinat klik ke sudut fisheye
+ *   - Formula focal length yang benar: param5 / calibRatio (bukan empiris)
+ *   - Thread-safe dengan std::mutex
+ *   - INTER_LINEAR + fixed-point maps (CV_16SC2) untuk performa optimal di ARM
+ *   - update_maps() thread-safe untuk kontrol real-time
+ *
+ * Digunakan oleh:
+ *   - run_fusion.cpp (C++ pipeline)
+ *   - core/gui_fusion.cpp (GUI overlay)
+ ******************************************************************************/
+#pragma once
 
+#include <memory>
+#include <mutex>
 #include <string>
-#include <memory> // Untuk std::unique_ptr
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 #include <opencv2/core.hpp>
 
-// Include header OpenCL yang baru
-// #include "lib/moildev_ocl.hpp"
-#include "constants/constants.hpp"
-#include "models/frame_model.hpp"
-#include <utility>
-#include "models/function_model.hpp"
-#include <mutex>
-
-#ifdef _WIN32
-
-#include "lib/moildev.hpp"
-
-using MoilEngine = moildev::Moildev;
-
-#else
-#ifdef USE_CUDA
-#include "lib/moildev_ocl.hpp"
-using MoilEngine = moildev::ocl::Moildev;
-#elif defined(USE_OPENCL_GPU)
-#include "lib/moildev_ocl.hpp"
-using MoilEngine = moildev::ocl::Moildev;
-#else
-#include "lib/moildev_cpu.hpp"
-using MoilEngine = moildev::cpu::Moildev;
-#endif
-#endif
+// Forward-declare engine CPU agar tidak ditarik ke setiap TU yang include header ini
+namespace moildev::cpu {
+class Moildev;
+}
 
 /**
  * @class MoildevApplicator
- * @brief High-Level Abstraction for the MOIL (Fisheye) SDK.
- * @details This Singleton acts as the "Optical Engine" of the application. It wraps the low-level `Moildev` library
- * and provides business-logic-aware methods to generate, cache, and manage the remapping matrices (maps)
- * required to dewarp fisheye images.
+ * @brief High-level fisheye undistortion engine berbasis MoildevApplicator dari unicorn-solution.
  *
- * **Key Responsibilities**:
- * - **Initialization**: Loads camera calibration (`.json`/`.xml`) into the Moil Engine.
- * - **Map Generation**: Creates discrete `mapX`/`mapY` files for specific views (Anypoint, Panorama).
- * - **Optimization**: Handles the "Regenerate Maps" feature to trade off between performance (low res) and quality (high res).
+ * Menyediakan:
+ *   - undistort(frame)       — remap fisheye ke anypoint
+ *   - update_maps(...)       — update parameter secara real-time (thread-safe)
+ *   - getAlphaBeta(x, y)     — konversi koordinat piksel ke sudut (Alpha, Beta)
+ *   - adjusted_focal_length()— focal length koreksi yang benar (param5/calibRatio)
+ *   - build_aruco_camera_matrix() — camera matrix K untuk ArUco
+ *
+ * Tidak mendukung panorama (kamera selalu menghadap ke bawah, alpha/beta ≈ 0).
  */
-class MoildevApplicator
-{
+class MoildevApplicator {
 public:
     /**
-     * @brief Gets the native (full) resolution of the maps as determined by the initialized Moildev camera parameters.
-     * @return cv::Size The native width and height.
+     * @brief Inisialisasi engine fisheye.
+     *
+     * Membaca profil kamera dari JSON, inisialisasi moildev::cpu::Moildev,
+     * pre-compute LUT Alpha-Rho (Horner's Method), dan build remap maps.
+     *
+     * @param json_path      Path ke camera_parameters.json
+     * @param camera_name    Nama profil di dalam JSON (contoh: "syue_7730v1_6")
+     * @param pitch          Sudut pitch dalam derajat (default 0.0)
+     * @param yaw            Sudut yaw dalam derajat   (default 0.0)
+     * @param roll           Sudut roll dalam derajat  (default 0.0)
+     * @param zoom           Faktor zoom                (default 1.4)
+     * @param mode           1=AnyPointM (alpha/beta), 2=AnyPointM2 (pitch/yaw) (default 2)
+     * @param frame_w        Lebar frame input (0 = gunakan ukuran JSON)
+     * @param frame_h        Tinggi frame input (0 = gunakan ukuran JSON)
+     * @param output_w       Lebar output map (0 = sama dengan frame)
+     * @param output_h       Tinggi output map (0 = sama dengan frame)
      */
-    cv::Size getNativeMapSize();
+    MoildevApplicator(const std::string &json_path,
+               const std::string &camera_name = "syue_7730v1_6",
+               float pitch  = 0.0f, float yaw  = 0.0f, float roll = 0.0f,
+               float zoom   = 1.4f, int   mode  = 2,
+               int   frame_w = 0,  int   frame_h = 0,
+               int   output_w = 0, int   output_h = 0);
 
-    // Deleted copy and move semantics to enforce the singleton pattern.
+    ~MoildevApplicator();
+
+    // Non-copyable
     MoildevApplicator(const MoildevApplicator &) = delete;
     MoildevApplicator &operator=(const MoildevApplicator &) = delete;
-    MoildevApplicator(MoildevApplicator &&) = delete;
-    MoildevApplicator &operator=(MoildevApplicator &&) = delete;
+
+    // ── Core API ─────────────────────────────────────────────────────────────
 
     /**
-     * @brief Gets the singleton instance of the MoildevApplicator.
-     * @return MoildevApplicator& A reference to the singleton instance.
+     * @brief Terapkan undistortion fisheye ke satu frame BGR.
+     * @param frame  Frame BGR input (fisheye mentah)
+     * @return       Frame BGR hasil undistortion
+     *               (INTER_LINEAR + fixed-point maps untuk performa ARM optimal)
      */
-    static MoildevApplicator &getInstance();
+    cv::Mat undistort(const cv::Mat &frame);
 
     /**
-     * @brief Generates/Caches the Remap Table for a Single Preset.
-     * @details Calculates the `mapX` and `mapY` matrices based on the `FunctionRecord`'s alpha/beta/zoom
-     * parameters and saves them to disk.
-     * @param functionRecord The preset to process. Modified in-place (map paths updated).
-     */
-    void createMap(FunctionRecord &functionRecord);
-
-    /**
-     * @brief Batch Generator: Creates Maps for ALL Presets.
-     * @details Iterates through the entire `FunctionModel` database and generates missing maps.
-     * Called on startup to ensure the cache is warm.
-     */
-    void createMaps();
-
-    /**
-     * @brief Global Resolution Rescaling (Performance Tuning).
-     * @details Re-computes ALL maps at a specific target resolution.
+     * @brief Update parameter anypoint dan regenerasi remap maps (thread-safe).
      *
-     * **Use Case**:
-     * - **Low Spec PC**: User sets "Performance Mode" -> Maps generated at 480p.
-     * - **High Spec PC**: User sets "Quality Mode" -> Maps generated at 1080p.
+     * Dipanggil oleh AnypointController saat user drag mouse / scroll.
+     * Aman dipanggil dari thread lain sementara undistort() berjalan.
+     */
+    void update_maps(float pitch, float yaw, float roll, float zoom);
+
+    /**
+     * @brief Konversi koordinat piksel pada frame fisheye ke sudut (Alpha, Beta).
      *
-     * @param targetResolution The new dimensions for all cached maps.
-     */
-    void regenerateAllMapsWithNewResolution(const cv::Size &targetResolution);
-
-    /**
-     * @brief Applies cropping (margins) to a base map and saves the result.
-     * @details It regenerates a clean, full-resolution base map, calculates a Region of Interest (ROI)
-     * based on the margin parameters in the `functionRecord`, crops the base map to this ROI,
-     * and then saves the final cropped map, overwriting the previous file.
-     * @param functionRecord The `FunctionRecord` containing the margin values to apply.
-     */
-    void applyMarginToMap(FunctionRecord &functionRecord);
-
-    /**
-     * @brief A helper function to generate a full-resolution base map for a given function.
-     * @details This function does not save the map; it only computes the `mapX` and `mapY` matrices in memory.
-     * @param func The `FunctionRecord` containing the parameters (alpha, beta, zoom) for the map.
-     * @param[out] mapX The output `cv::Mat` for the X-map.
-     * @param[out] mapY The output `cv::Mat` for the Y-map.
-     */
-    void generateBaseMapForFunction(const FunctionRecord &func, cv::Mat &mapX, cv::Mat &mapY);
-
-    /**
-     * @brief Hot-Reloads Camera Calibration.
-     * @details Called when the user changes the camera parameters (Center X/Y, Radius) in Settings.
-     * It reinits the Moil Engine and forces a regeneration of all maps to match the new lens optics.
-     */
-    void reconfigureAndRemap();
-
-    /**
-     * @brief Generates a remapping map with specific dimensions and parameters.
-     * @details This function creates a map of a given type (e.g., "Anypoint") with the specified
-     * angular parameters and target dimensions, without relying on a stored `FunctionRecord`.
-     * @param type The type of map to generate (e.g., "Anypoint", "Panorama").
-     * @param alpha The vertical viewing angle (elevation) in degrees.
-     * @param beta The horizontal viewing angle (azimuth) in degrees.
-     * @param zoom The magnification factor.
-     * @param width The target width of the output map.
-     * @param height The target height of the output map.
-     * @return std::pair<cv::Mat, cv::Mat> A pair containing the generated `mapX` and `mapY`.
-     */
-    std::pair<cv::Mat, cv::Mat> generateMapWithDimension(
-        const std::string &type,
-        float alpha, float beta, float zoom,
-        int width, int height);
-
-    /**
-     * @brief Inverse Kinematics: Pixel to Angle.
-     * @details Converts a 2D point on the fisheye image to its corresponding 3D spherical coordinates (Alpha/Beta).
-     * Used for "Click-to-Move" functionality (e.g., clicking on the raw image to center the view there).
+     * Menggunakan LUT Rho-to-Alpha yang sudah di-pre-compute saat konstruktor.
+     * Setara dengan MoildevApplicator::getAlphaBeta() dari unicorn-solution.
      *
-     * @param x Horizontal pixel position.
-     * @param y Vertical pixel position.
-     * @return Pair of {Alpha (Tilt), Beta (Pan)} angles.
+     * @param x  Koordinat piksel horizontal
+     * @param y  Koordinat piksel vertikal
+     * @return   {Alpha (elevasi derajat), Beta (azimuth derajat)}
      */
-    std::pair<float, float> getAlphaBeta(int x, int y);
+    std::pair<float, float> get_alpha_beta(int x, int y) const;
 
     /**
-     * @brief Gets the name of the active backend (e.g., "CUDA", "OpenCL", "CPU").
-     * @return std::string The backend name.
+     * @brief Buat camera matrix 3×3 untuk deteksi ArUco.
+     *
+     * Formula yang benar: fl = adjusted_focal_length()
+     * (BUKAN formula empiris zoom/zoom_ref² yang menyebabkan Z_tray meleset).
+     *
+     * @param frame_width   Lebar frame aktual
+     * @param frame_height  Tinggi frame aktual
+     * @return cv::Mat (3×3, CV_64F)
      */
-    std::string getBackendName() const;
+    cv::Mat build_aruco_camera_matrix(int frame_width, int frame_height) const;
+
+    // ── Accessor parameter ─────────────────────────────────────────────────
+
+    float pitch_deg()   const { return pitch_; }
+    float yaw_deg()     const { return yaw_;   }
+    float roll_deg()    const { return roll_;  }
+    float zoom_factor() const { return zoom_;  }
+    int   mode()        const { return mode_;  }
+
+    // Alias agar kompatibel dengan AnypointController lama
+    float pitch         = 0.0f; ///< Dibaca oleh AnypointController::draw_overlay()
+    float yaw           = 0.0f;
+    float roll          = 0.0f;
+    float zoom          = 1.4f;
+
+    float image_width()  const { return img_w_; }
+    float image_height() const { return img_h_; }
 
     /**
-     * @brief Provides direct access to the underlying Moildev engine instance.
-     * @return Moildev& A reference to the internal `Moildev` object.
+     * @brief Focal length ekivalen piksel yang benar.
+     *
+     * Formula: param5_ / calib_ratio_
+     * Ini adalah formula yang sama dengan unicorn-solution (MoildevApplicator).
      */
-    // Getter pointer ke engine OCL jika dibutuhkan akses langsung
-    MoilEngine *getMoildev()
-    {
-        return moil.get();
-    }
+    float adjusted_focal_length() const;
+
+    /**
+     * @brief Nama backend yang aktif ("CPU").
+     * Diperluas ke "OpenCL" / "CUDA" di masa depan.
+     */
+    std::string getBackendName() const { return "CPU"; }
+
+    /**
+     * @brief Set sharpening setelah remap (opsional).
+     * @param amount  0.0 = tidak ada, 1.0 = sedang, 2.0 = kuat
+     */
+    void set_sharpen(float amount);
+    float sharpen_amount() const { return sharpen_amount_; }
+
+    /**
+     * @brief Toggle debug output (default: OFF).
+     *
+     * Saat verbose=true, rebuild_maps_() mencetak info diagnostik:
+     *   "[MOIL-DBG] maps rebuilt ..."
+     * Hanya aktifkan saat debugging; JANGAN aktifkan di production
+     * karena melakukan cv::minMaxLoc pada map besar setiap frame.
+     *
+     * @param v  true = aktifkan debug output, false = silent (default)
+     */
+    void set_verbose(bool v) { verbose_ = v; }
+    bool is_verbose()  const { return verbose_; }
 
 private:
-    /** @brief Private constructor to enforce the singleton pattern. */
-    MoildevApplicator();
+    // ── Engine Moildev CPU (libmoildev_cpu.so) ────────────────────────────
+    std::unique_ptr<moildev::cpu::Moildev> moil_;
 
-    /** @brief Default destructor. */
-    ~MoildevApplicator() = default;
+    // ── Parameter kamera (dari JSON) ──────────────────────────────────────
+    double param5_;       ///< parameter5 dari kalibrasi
+    double calib_ratio_;  ///< calibrationRatio dari kalibrasi
+    double icx_, icy_;    ///< pusat optik pada resolusi output
 
-    /// A flag to track if the Moildev instance has been created (not currently used).
-    static bool moilCreated;
-    /// The core Moildev engine instance.
-    std::unique_ptr<MoilEngine> moil;
+    float img_w_, img_h_;        ///< resolusi sensor dari JSON
+    float frame_w_, frame_h_;    ///< resolusi frame input aktual
+    float output_w_, output_h_;  ///< resolusi output remap
 
-    std::recursive_mutex mtx;
+    // ── Parameter anypoint saat ini ───────────────────────────────────────
+    float pitch_, yaw_, roll_, zoom_;
+    int   mode_;
 
-    /** @brief Initializes the internal Moildev object with the loaded camera parameters. */
-    void initializeMoil();
-    /** @brief Loads camera parameters from the database via the `Constants` utility. */
-    void loadCameraParametersFromDatabase();
-    /** @brief Pre-computes the lookup tables for fast alpha-to-rho and rho-to-alpha conversions. */
-    void initializeAlphaRhoTables();
+    // ── Sharpening pasca-remap ─────────────────────────────────────────────
+    float sharpen_amount_ = 0.0f;
 
-    /// Lookup table for converting elevation angle (alpha) to pixel radius (rho).
-    std::vector<double> alpha_to_rho_table;
-    /// Lookup table for converting pixel radius (rho) to elevation angle (alpha).
-    std::vector<int> rho_to_alpha_table;
+    // ── Verbose/debug flag ────────────────────────────────────────────────
+    // Default false — tidak ada output di production.
+    // Set ke true via set_verbose(true) hanya untuk debugging lokal.
+    bool verbose_ = false;
+
+    // ── Remap maps ────────────────────────────────────────────────────────
+    cv::Mat map_x_, map_y_;           ///< Float32 maps (source of truth)
+    cv::Mat map_x_fixed_, map_y_fixed_; ///< Fixed-point maps (CV_16SC2 + CV_16UC1)
+                                      ///< Pre-konversi via cv::convertMaps untuk
+                                      ///< performa ARM/RZ-V2H optimal (~2-4x speedup)
+    mutable std::mutex maps_mutex_;
+
+    // ── LUT Alpha-Rho (diport dari MoildevApplicator::initializeAlphaRhoTables) ──
+    std::vector<double> alpha_to_rho_table_;  ///< alpha (derajat*10) → rho (piksel)
+    std::vector<int>    rho_to_alpha_table_;  ///< rho (piksel)       → alpha (derajat*10)
+
+    // ── Private helpers ───────────────────────────────────────────────────
+
+    /** Regenerasi maps dari parameter saat ini. Harus dipanggil di bawah maps_mutex_. */
+    void rebuild_maps_();
+
+    /**
+     * Pre-compute LUT Alpha-Rho menggunakan Horner's Method.
+     * Diport dari MoildevApplicator::initializeAlphaRhoTables() unicorn-solution.
+     * Horner's Method: O(n) vs O(n log n) dari pow() biasa.
+     */
+    void init_alpha_rho_tables_(double p0, double p1, double p2,
+                                double p3, double p4, double p5,
+                                double calib);
 };
-
-#endif // MOILDEV_APPLICATOR_HPP

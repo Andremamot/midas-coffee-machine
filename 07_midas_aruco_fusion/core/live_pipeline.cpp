@@ -356,13 +356,58 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
                                                        ? focal_px
                                                        : aruco.camera_matrix.at<double>(0, 0);
                                     float rim_w_px = VolumeMath::measureRimWidthPx(frame, bbox);
+
+                                    /* Formula diameter: D = rim_w_px * z_rim / focal
+                                     * rim dari gelas berada pada kedalaman z_rim dari kamera.
+                                     * Geometric projection: D_real = rim_w_px * z_rim / focal
+                                     *
+                                     * PENTING: h_cup harus akurat (dari kalibrasi yang benar).
+                                     * Jika h_cup > z_tray (kalibrasi salah), z_rim → 0
+                                     * dan diameter → sangat kecil → volume → sangat kecil. */
                                     cup_diameters[i] = VolumeMath::calcDiameter(
                                         rim_w_px, z_rim_val, focal_eff);
-                                    cup_volumes[i]   = VolumeMath::calcVolume(
-                                        cup_heights_ema[i], cup_diameters[i]);
-                                    cup_vol_valid[i] = true;
+
+                                    /* Sanity check: diameter tidak boleh > 20cm untuk gelas kopi */
+                                    if (cup_diameters[i] > 20.0 || cup_diameters[i] < 1.0) {
+                                        cup_vol_valid[i] = false;
+                                        if (stats_total_frames % 30 == 1) {
+                                            std::cout << "[VOL-WARN] cup=" << i
+                                                      << " diameter out of range: "
+                                                      << cup_diameters[i] << " cm"
+                                                      << " (h=" << cup_heights_ema[i]
+                                                      << " z_tray=" << z_tray_live
+                                                      << " z_rim=" << z_rim_val
+                                                      << " rim_w=" << rim_w_px << "px)\n";
+                                            std::cout.flush();
+                                        }
+                                    } else {
+                                        cup_volumes[i] = VolumeMath::calcVolume(
+                                            cup_heights_ema[i], cup_diameters[i]);
+                                        cup_vol_valid[i] = true;
+                                    }
+
+                                    /* Debug log setiap 30 frame */
+                                    if (stats_total_frames % 30 == 1) {
+                                        std::cout << "[VOL-DBG] cup=" << i
+                                                  << " h=" << cup_heights_ema[i]
+                                                  << " z_tray=" << z_tray_live
+                                                  << " z_rim=" << z_rim_val
+                                                  << " rim_w=" << rim_w_px << "px"
+                                                  << " D=" << cup_diameters[i] << "cm"
+                                                  << " V=" << cup_volumes[i] << "ml\n";
+                                        std::cout.flush();
+                                    }
                                 } else {
                                     cup_vol_valid[i] = false;
+                                    if (stats_total_frames % 30 == 1 && z_rim_val <= 0.0) {
+                                        std::cout << "[VOL-WARN] cup=" << i
+                                                  << " z_rim=" << z_rim_val
+                                                  << " <= 0 (h_cup=" << cup_heights_ema[i]
+                                                  << " >= z_tray=" << z_tray_live
+                                                  << ") → cek kalibrasi!\n";
+                                        std::cout.flush();
+                                    }
+
                                 }
                             } else {
                                 cup_vol_valid[i] = false;

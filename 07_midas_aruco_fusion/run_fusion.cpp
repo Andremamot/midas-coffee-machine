@@ -299,10 +299,37 @@ int main(int argc, char* argv[])
                 args.output_height
             );
 
-            /* NOTE: ArUco camera matrix TIDAK di-override dari Moildev.
-             * Tetap gunakan matrix dari calibration_params.yml yang sudah dikalibrasi
-             * dan memberikan Z_tray yang akurat. Override Moildev menyebabkan Z_tray 2x salah. */
-            std::cout << "[MOIL] Fisheye undistorter ready. ArUco menggunakan matrix dari calibration_params.yml.\n\n";
+            /* Override aruco.camera_matrix ke focal dari Moildev.
+             *
+             * MENGAPA: calibration_params.yml dikalibrasi pada resolusi kecil
+             * (640×480) dengan focal ~660px. Frame undistorted dari moildev
+             * berukuran 2592×1944 dengan zoom=2, sehingga focal yang benar:
+             *   fl = param5/calibRatio × zoom × scale = 504.7 × 2 × 1 = 1009.4 px
+             *
+             * Dengan focal 660px di frame zoom=2:
+             *   z_aruco = z_real × (660 / 1009.4) ≈ 0.65 × z_real (terlalu kecil!)
+             *
+             * build_aruco_camera_matrix() sudah include zoom_ factor (fix terbaru).
+             *
+             * NOTE sebelumnya "Z_tray 2x salah" terjadi karena zoom TIDAK disertakan
+             * di adjusted_focal_length(). Kini sudah diperbaiki dengan: fl × zoom. */
+            {
+                /* Ambil satu frame dummy untuk mengetahui output resolution */
+                cv::Mat dummy = cam.get_frame();
+                if (dummy.empty()) {
+                    /* Fallback: gunakan resolusi output default */
+                    dummy = cv::Mat::zeros(args.output_height > 0 ? args.output_height : 1944,
+                                          args.output_width  > 0 ? args.output_width  : 2592, CV_8UC3);
+                }
+                cv::Mat dummy_undist = moil_undistorter->undistort(dummy);
+                aruco.camera_matrix = moil_undistorter->build_aruco_camera_matrix(
+                    dummy_undist.cols, dummy_undist.rows);
+                aruco.dist_coeffs = cv::Mat::zeros(1, 5, CV_64F);
+                std::cout << "[MOIL] Fisheye undistorter ready.\n"
+                          << "[MOIL] ArUco camera matrix OVERRIDDEN ke moildev focal"
+                          << " (param5/calibRatio × zoom × scale):\n"
+                          << "[MOIL] fx = " << aruco.camera_matrix.at<double>(0,0) << " px\n\n";
+            }
         } catch (const std::exception& e) {
             std::cerr << "[MOIL ERROR] Failed to initialize MoildevApplicator: "
                       << e.what() << "\n";

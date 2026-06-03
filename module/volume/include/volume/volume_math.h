@@ -1,53 +1,53 @@
-/**
- * @file volume_math.h
- * @brief Fungsi estimasi volume gelas dari data kamera.
+/*******************************************************************************
+ * volume_math.hpp
+ * C++ port of 07_midas_aruco_fusion_new/core/volume_math.py
  *
- * Port dari Python: 07_midas_aruco_fusion/core/volume_math.py
- *
- * Pipeline:
- *   measure_rim_width_px() → calc_diameter() → calc_volume()
- */
-
+ * Fungsi pure-math untuk estimasi volume gelas dari data sensor:
+ *   1. measureRimWidthPx   — lebar rim via Otsu threshold (lebih akurat dari bbox_w)
+ *   2. calcDiameter        — diameter fisik (cm) via pinhole model
+ *   3. calcVolume          — volume silinder (mL = cm³)
+ ******************************************************************************/
 #pragma once
+/* Synced from 07_midas_aruco_fusion/core/volume_math.hpp */
 
-#include <opencv2/core.hpp>
-#include "height_math.h"   // for BBox
+#include <opencv2/opencv.hpp>
 
-namespace fusion {
-
-/**
- * @brief Ukur lebar rim gelas (piksel) via Otsu strip detection.
- *
- * Mengambil strip 10% atas dari bbox, lakukan Otsu threshold,
- * lalu cari kolom kiri-kanan yang ada piksel.
- *
- * @param frame  BGR frame (sudah di-undistort oleh modul)
- * @param bbox   Bounding box gelas dari YOLO
- * @return Lebar rim dalam piksel (selalu > 0, fallback 50% bbox width)
- */
-double measure_rim_width_px(const cv::Mat& frame, const BBox& bbox);
+namespace VolumeMath {
 
 /**
- * @brief Hitung diameter fisik gelas (cm) via pinhole camera model.
+ * Ukur lebar gelas di level rim (strip atas bounding box).
  *
- * diameter = (rim_w_px × z_rim_cm) / focal_px
+ * Menggunakan Otsu threshold pada strip horizontal tipis (10% bbox_h)
+ * di bagian atas bbox untuk menemukan tepi kiri-kanan gelas di level bibir.
+ * Lebih akurat dari bbox_w penuh karena tidak terpengaruh body yang lebih lebar.
  *
- * @param rim_w_px  Lebar rim dalam piksel
- * @param z_rim_cm  Jarak kamera → bibir gelas (cm) = z_tray - h_cup
- * @param focal_px  Focal length efektif dalam piksel
- * @return Diameter dalam cm (0.0 jika input tidak valid)
+ * @param frame  Frame BGR yang sudah di-undistort.
+ * @param bbox   Bounding box gelas dari YOLO (x, y, w, h dalam cv::Rect).
+ * @return       Lebar rim dalam piksel. Selalu >= 1.0.
  */
-double calc_diameter(double rim_w_px, double z_rim_cm, double focal_px);
+float measureRimWidthPx(const cv::Mat& frame, const cv::Rect& bbox);
 
 /**
- * @brief Hitung volume gelas (mL) menggunakan model silinder.
+ * Hitung diameter fisik gelas (cm) via model pinhole kamera.
  *
- * V = π × (d/2)² × h   (1 cm³ = 1 mL)
+ * Formula: diameter = (rim_w_px × z_rim_cm) / focal_px
  *
- * @param h_cup_cm    Tinggi gelas dalam cm
- * @param diameter_cm Diameter gelas dalam cm
- * @return Volume dalam mL (0.0 jika input tidak valid)
+ * @param rim_w_px   Lebar rim dalam piksel (dari measureRimWidthPx).
+ * @param z_rim_cm   Jarak kamera ke bibir gelas dalam cm (z_tray - h_cup).
+ * @param focal_px   Focal length efektif dalam piksel (aruco camera_matrix[0,0]).
+ * @return           Diameter dalam cm. Return 0.0 jika input tidak valid.
  */
-double calc_volume(double h_cup_cm, double diameter_cm);
+double calcDiameter(double rim_w_px, double z_rim_cm, double focal_px);
 
-}  // namespace fusion
+/**
+ * Hitung volume gelas (mL) menggunakan model silinder.
+ *
+ * Formula: V = π × (d/2)² × h   (1 cm³ = 1 mL)
+ *
+ * @param h_cup_cm     Tinggi gelas dalam cm.
+ * @param diameter_cm  Diameter gelas dalam cm (dari calcDiameter).
+ * @return             Volume dalam mL. Return 0.0 jika input tidak valid.
+ */
+double calcVolume(double h_cup_cm, double diameter_cm);
+
+} // namespace VolumeMath
