@@ -122,3 +122,5 @@ test-module-app
 /07_midas_aruco_fusion/tests/
 /07_midas_aruco_fusion_new
 moil_undistorter.cpp
+
+.agents

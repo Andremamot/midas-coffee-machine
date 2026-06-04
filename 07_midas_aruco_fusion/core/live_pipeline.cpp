@@ -384,19 +384,21 @@ void inference_worker(Camera* cam, ArucoDetector* aruco_ptr, const nlohmann::jso
                                         cup_volumes[i] = VolumeMath::calcVolume(
                                             cup_heights_ema[i], cup_diameters[i]);
                                         cup_vol_valid[i] = true;
+                                        /* Debug log setiap 10 frame untuk diagnostik mid_w */
+                                        if (stats_total_frames % 10 == 1) {
+                                            std::cout << "[VOL-DBG] cup=" << i
+                                                      << " h=" << cup_heights_ema[i]
+                                                      << " z_tray=" << z_tray_live
+                                                      << " z_rim=" << z_rim_val
+                                                      << " bbox_w=" << bbox.width << "px"
+                                                      << " mid_w=" << rim_w_px << "px"
+                                                      << " mid/bbox=" << (rim_w_px / (float)bbox.width * 100.0f) << "%"
+                                                      << " D=" << cup_diameters[i] << "cm"
+                                                      << " V=" << cup_volumes[i] << "ml\n";
+                                            std::cout.flush();
+                                        }
                                     }
 
-                                    /* Debug log setiap 30 frame */
-                                    if (stats_total_frames % 30 == 1) {
-                                        std::cout << "[VOL-DBG] cup=" << i
-                                                  << " h=" << cup_heights_ema[i]
-                                                  << " z_tray=" << z_tray_live
-                                                  << " z_rim=" << z_rim_val
-                                                  << " rim_w=" << rim_w_px << "px"
-                                                  << " D=" << cup_diameters[i] << "cm"
-                                                  << " V=" << cup_volumes[i] << "ml\n";
-                                        std::cout.flush();
-                                    }
                                 } else {
                                     cup_vol_valid[i] = false;
                                     if (stats_total_frames % 30 == 1 && z_rim_val <= 0.0) {
