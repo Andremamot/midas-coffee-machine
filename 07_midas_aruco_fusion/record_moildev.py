@@ -2,7 +2,6 @@ import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
 import cv2
-cv2.ocl.setUseOpenCL(False)  # Disable OpenCL for stability
 import os
 import sys
 import time
@@ -11,14 +10,10 @@ import threading
 import numpy as np
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_MOIL_DIR = os.path.join(_THIS_DIR, "moildev")
-if _MOIL_DIR not in sys.path:
-    sys.path.insert(0, _MOIL_DIR)
-
 try:
-    from Moildev import Moildev as MoildevLib
+    from core.moildev_applicator import MoildevApplicator
 except ImportError as e:
-    print(f"[ERROR] Gagal import Moildev: {e}")
+    print(f"[ERROR] Gagal import MoildevApplicator: {e}")
     sys.exit(1)
 
 SAVE_DIR = os.path.join(_THIS_DIR, "recorded_videos")
@@ -67,7 +62,17 @@ class MoildevRecordingWindow(Gtk.Window):
         cam_name = self.entry_moil_cam.get_text()
         json_path = os.path.join(_THIS_DIR, "camera_parameters.json")
         try:
-            self.moil = MoildevLib(json_path, cam_name)
+            self.moil = MoildevApplicator(
+                json_path=json_path,
+                camera_name=cam_name,
+                pitch=self.scale_alpha_adj.get_value(),
+                yaw=self.scale_beta_adj.get_value(),
+                zoom=self.scale_zoom_adj.get_value(),
+                mode=1,
+                use_opencl=True,
+                frame_width=2592,
+                frame_height=1944
+            )
             self.update_maps()
         except Exception as e:
             print(f"[ERROR] Inisiasi Moildev gagal: {e}")
@@ -80,10 +85,7 @@ class MoildevRecordingWindow(Gtk.Window):
         zoom  = self.scale_zoom_adj.get_value()
         params = (alpha, beta, zoom)
         if params != self.current_moil_params:
-            map_x, map_y = self.moil.maps_anypoint_mode1(alpha, beta, zoom)
-            with self.lock:
-                self.map_x = cv2.UMat(map_x.astype(np.float32))
-                self.map_y = cv2.UMat(map_y.astype(np.float32))
+            self.moil.update_maps(pitch=alpha, yaw=beta, zoom=zoom)
             self.current_moil_params = params
 
     # ─── UI ──────────────────────────────────────────────────────────────────
@@ -102,7 +104,7 @@ class MoildevRecordingWindow(Gtk.Window):
 
         # Camera index
         hb_cam = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        self.entry_cam = Gtk.Entry(text="0")
+        self.entry_cam = Gtk.Entry(text="1")
         btn_switch = Gtk.Button(label="Switch")
         btn_switch.connect("clicked", self.on_switch_camera)
         hb_cam.pack_start(Gtk.Label(label="Cam Index:"), False, False, 0)
@@ -147,25 +149,31 @@ class MoildevRecordingWindow(Gtk.Window):
 
         self.scale_alpha_adj = Gtk.Adjustment(value=0, lower=0, upper=110, step_increment=1, page_increment=10, page_size=0)
         self.scale_beta_adj  = Gtk.Adjustment(value=0, lower=0, upper=360, step_increment=1, page_increment=10, page_size=0)
-        self.scale_zoom_adj  = Gtk.Adjustment(value=4, lower=1, upper=20,  step_increment=1, page_increment=2,  page_size=0)
+        self.scale_zoom_adj  = Gtk.Adjustment(value=4, lower=1, upper=20,  step_increment=0.1, page_increment=2,  page_size=0)
 
-        def on_moil_scale_changed(widget):
-            self.update_maps()
+        self.spin_alpha = Gtk.SpinButton(adjustment=self.scale_alpha_adj, climb_rate=1.0, digits=0)
+        self.spin_beta  = Gtk.SpinButton(adjustment=self.scale_beta_adj, climb_rate=1.0, digits=0)
+        self.spin_zoom  = Gtk.SpinButton(adjustment=self.scale_zoom_adj, climb_rate=0.1, digits=1)
 
-        self.scale_alpha_adj.connect("value-changed", on_moil_scale_changed)
-        self.scale_beta_adj.connect("value-changed", on_moil_scale_changed)
-        self.scale_zoom_adj.connect("value-changed", on_moil_scale_changed)
+        hb_alpha = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        hb_alpha.pack_start(Gtk.Label(label="Alpha:"), False, False, 0)
+        hb_alpha.pack_start(self.spin_alpha, True, True, 0)
 
-        s_alpha = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.scale_alpha_adj)
-        s_alpha.set_digits(0); s_alpha.set_value_pos(Gtk.PositionType.RIGHT)
-        s_beta  = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.scale_beta_adj)
-        s_beta.set_digits(0);  s_beta.set_value_pos(Gtk.PositionType.RIGHT)
-        s_zoom  = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.scale_zoom_adj)
-        s_zoom.set_digits(1);  s_zoom.set_value_pos(Gtk.PositionType.RIGHT)
+        hb_beta = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        hb_beta.pack_start(Gtk.Label(label="Beta:"), False, False, 0)
+        hb_beta.pack_start(self.spin_beta, True, True, 0)
 
-        vb_m.pack_start(Gtk.Label(label="Alpha:"), 0, 0, 0); vb_m.pack_start(s_alpha, 0, 0, 0)
-        vb_m.pack_start(Gtk.Label(label="Beta:"),  0, 0, 0); vb_m.pack_start(s_beta,  0, 0, 0)
-        vb_m.pack_start(Gtk.Label(label="Zoom:"),  0, 0, 0); vb_m.pack_start(s_zoom,  0, 0, 0)
+        hb_zoom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        hb_zoom.pack_start(Gtk.Label(label="Zoom:"), False, False, 0)
+        hb_zoom.pack_start(self.spin_zoom, True, True, 0)
+
+        vb_m.pack_start(hb_alpha, False, False, 0)
+        vb_m.pack_start(hb_beta, False, False, 0)
+        vb_m.pack_start(hb_zoom, False, False, 0)
+
+        btn_save_moil = Gtk.Button(label="Save")
+        btn_save_moil.connect("clicked", self.on_save_moil_params)
+        vb_m.pack_start(btn_save_moil, False, False, 5)
 
         f_moil.add(vb_m)
         vbox_ctrl.pack_start(f_moil, False, False, 10)
@@ -284,6 +292,9 @@ class MoildevRecordingWindow(Gtk.Window):
 
     def run_loop(self):
         current_idx = None
+        fail_count = 0          # hitung consecutive read failure
+        MAX_FAILS = 15          # setelah ini, anggap device hilang → reopen
+        last_good_frame = None  # simpan frame terakhir yang valid
         while self.running:
             try:
                 with self.lock:
@@ -330,9 +341,36 @@ class MoildevRecordingWindow(Gtk.Window):
                 self._apply_hw_if_needed()
 
                 ret, frame = self.cap.read()
-                if not ret:
-                    time.sleep(0.01)
+                if not ret or frame is None:
+                    fail_count += 1
+                    if fail_count >= MAX_FAILS:
+                        # Device kemungkinan sudah hilang — release dan reopen
+                        print(f"[WARN] Camera {current_idx} gagal baca {fail_count}x berturut-turut. Reopen...")
+                        GLib.idle_add(self.lbl_status.set_text, f"Camera {current_idx} lost. Reopening...")
+                        self.cap.release()
+                        self.cap = None
+                        fail_count = 0
+                        time.sleep(2.0)
+                    else:
+                        time.sleep(0.01)
                     continue
+
+                # Deteksi frame korup: cek apakah terlalu banyak baris yang zero (putih)
+                # Frame dari JPEG korup sering punya baris horizontal yang seragam 0 atau 255
+                gray_sample = cv2.cvtColor(frame[::8, ::8], cv2.COLOR_BGR2GRAY)
+                zero_rows = np.sum(np.all(gray_sample == 0, axis=1))
+                white_rows = np.sum(np.all(gray_sample >= 254, axis=1))
+                h_sample = gray_sample.shape[0]
+                if (zero_rows + white_rows) > h_sample * 0.3:
+                    # >30% baris seragam → frame korup, skip
+                    if last_good_frame is not None:
+                        frame = last_good_frame
+                    else:
+                        fail_count += 1
+                        continue
+                else:
+                    fail_count = 0
+                    last_good_frame = frame.copy()
 
                 # Buang frame stale pasca hardware change
                 if self._hw_flush[0] > 0:
@@ -341,16 +379,8 @@ class MoildevRecordingWindow(Gtk.Window):
                     if ret2 and frame2 is not None:
                         frame = frame2
 
-                with self.lock:
-                    map_x_copy = self.map_x
-                    map_y_copy = self.map_y
-
-                if self.moil and map_x_copy is not None and map_y_copy is not None:
-                    umat_frame   = cv2.UMat(frame)
-                    remapped_umat = cv2.remap(umat_frame, map_x_copy, map_y_copy,
-                                              cv2.INTER_LINEAR,
-                                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-                    remapped_frame = remapped_umat.get()
+                if self.moil:
+                    remapped_frame = self.moil.undistort(frame)
                 else:
                     remapped_frame = frame.copy()
 
@@ -418,21 +448,24 @@ class MoildevRecordingWindow(Gtk.Window):
     def on_reload_moil(self, widget):
         self.init_moildev()
 
+    def on_save_moil_params(self, widget):
+        self.update_maps()
+
     def on_toggle_record(self, widget):
+        writer_to_release = None
         with self.lock:
             if not self.is_recording:
                 # Dapatkan resolusi frame
                 w, h = 2592, 1944 # default fallback
-                if self.map_x is not None:
-                    h, w = self.map_x.get().shape[:2]
+                if self.moil:
+                    w, h = self.moil.frame_width, self.moil.frame_height
                 elif self.cap and self.cap.isOpened():
                     w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_path = os.path.join(SAVE_DIR, f"moildev_remap_{ts}.avi")
-                # Gunakan MJPG karena lebih stabil dan minim konflik thread dengan GTK
-                fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+                output_path = os.path.join(SAVE_DIR, f"moildev_remap_{ts}.mp4")
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 self.out_video = cv2.VideoWriter(output_path, fourcc, int(self.fps), (w, h))
                 self._last_video_path = output_path
                 self.recorded_frames_count = 0
@@ -444,14 +477,23 @@ class MoildevRecordingWindow(Gtk.Window):
             else:
                 self.is_recording = False
                 self.btn_record.set_label("⏺  Start Recording")
-                if self.out_video:
-                    self.out_video.release()
-                    self.out_video = None
-                self.lbl_status.set_text("Recording Saved.")
-                print(f"\n[REPORT] Selesai merekam. Total frame: {self.recorded_frames_count}\n")
-                # Otomatis isi path ke kolom extract
-                if hasattr(self, '_last_video_path') and self._last_video_path:
-                    self.entry_vid_path.set_text(self._last_video_path)
+                # Ambil referensi out_video untuk dirilis di luar lock
+                writer_to_release = self.out_video
+                self.out_video = None
+                self.lbl_status.set_text("Menyimpan video...")
+                total = self.recorded_frames_count
+                last_path = getattr(self, '_last_video_path', None)
+
+        # Release VideoWriter di luar lock agar camera loop tidak freeze
+        if not self.is_recording and writer_to_release is not None:
+            def _do_release():
+                writer_to_release.release()
+                print(f"\n[REPORT] Selesai merekam. Total frame: {total}\n")
+                GLib.idle_add(self.lbl_status.set_text, "Recording Saved.")
+                if last_path:
+                    GLib.idle_add(self.entry_vid_path.set_text, last_path)
+            threading.Thread(target=_do_release, daemon=True).start()
+        return
 
     def on_browse_video(self, widget):
         dialog = Gtk.FileChooserDialog(

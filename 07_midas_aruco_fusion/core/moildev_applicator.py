@@ -39,11 +39,12 @@ import numpy as np
 # ── Cari libmoildev_cpu.so ────────────────────────────────────────────────────
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJ_DIR = os.path.abspath(os.path.join(_THIS_DIR, ".."))
+_ROOT_DIR = os.path.abspath(os.path.join(_PROJ_DIR, ".."))
 
 # Path kandidat library (sesuai build system unicorn-solution / midas)
 _LIB_CANDIDATES = [
-    os.path.join(_PROJ_DIR, "module", "moil", "lib", "libmoildev_cpu.so"),
-    os.path.join(_PROJ_DIR, "..", "unicorn-solution", "lib", "linux", "x86_64", "libmoildev_cpu.so"),
+    os.path.join(_ROOT_DIR, "module", "moil", "lib", "libmoildev_cpu.so"),
+    os.path.join(_ROOT_DIR, "..", "unicorn-solution", "lib", "linux", "x86_64", "libmoildev_cpu.so"),
     "/usr/local/lib/libmoildev_cpu.so",
     "/usr/lib/libmoildev_cpu.so",
 ]
@@ -59,10 +60,10 @@ for _candidate in _LIB_CANDIDATES:
             continue
 
 if _libmoil is None:
-    raise ImportError(
-        "[MoildevApplicator] Tidak bisa menemukan libmoildev_cpu.so.\n"
+    warnings.warn(
+        "[MoildevApplicator] Tidak bisa menemukan libmoildev_cpu.so yang cocok untuk arsitektur ini.\n"
         f"Kandidat yang dicari:\n" + "\n".join(f"  - {p}" for p in _LIB_CANDIDATES) + "\n"
-        "Pastikan libmoildev_cpu.so ada di salah satu path di atas."
+        "Akan menggunakan Python-native fallback."
     )
 
 
@@ -173,6 +174,7 @@ class MoildevApplicator:
         p3 = float(cam.get("parameter3", 0.0))
         p4 = float(cam.get("parameter4", 0.0))
         p5 = self._parameter5
+        self._p0, self._p1, self._p2, self._p3, self._p4, self._p5 = p0, p1, p2, p3, p4, p5
 
         print(f"[MOILDEV] Profil: {camera_name}")
         print(f"[MOILDEV] Sensor: {self._sensor_width:.0f}x{self._sensor_height:.0f} → "
@@ -329,36 +331,89 @@ class MoildevApplicator:
 
     def _fill_maps_python(self, map_x, map_y, pitch, yaw, roll, zoom, mode):
         """
-        Generate anypoint remap maps secara Python-native.
-        Formula berdasarkan polynomial fisheye Moildev (LUT alpha-to-rho).
-
-        Mode 2 (default untuk coffee machine):
-          Pitch = rotasi vertikal (kamera ke bawah → pitch ≈ -15 hingga 0)
-          Yaw   = rotasi horizontal
+        Vectorized Python-native Anypoint remap (Mode 1 & Mode 2).
+        Mengatasi gambar pixelated/burik dengan menghitung proyeksi lensa fisheye secara matematis.
         """
         h, w = map_x.shape
         icx = self._icx
         icy = self._icy
 
+        # Focal length virtual camera (Moildev convention)
+        f_v = self.adjusted_focal_length * (zoom if zoom > 0 else 1.0)
+        
+        cx_v = w / 2.0
+        cy_v = h / 2.0
+
+        u, v = np.meshgrid(np.arange(w), np.arange(h))
+        x_v = u - cx_v
+        y_v = v - cy_v
+        z_v = np.full_like(x_v, f_v)
+
+        # Normalize virtual rays
+        norm = np.sqrt(x_v**2 + y_v**2 + z_v**2)
+        Vx = x_v / norm
+        Vy = y_v / norm
+        Vz = z_v / norm
+
         DEG_TO_RAD = math.pi / 180.0
-        pitch_r = pitch * DEG_TO_RAD
-        yaw_r   = yaw   * DEG_TO_RAD
 
-        # Pre-compute trig
-        cp = math.cos(pitch_r); sp = math.sin(pitch_r)
-        cy = math.cos(yaw_r);   sy = math.sin(yaw_r)
+        if mode == 1:
+            # Mode 1: pitch=alpha, yaw=beta
+            alpha = pitch * DEG_TO_RAD
+            beta  = yaw * DEG_TO_RAD
+            phi = (90.0 * DEG_TO_RAD) - beta
 
-        for row in range(h):
-            for col in range(w):
-                # Koordinat relatif ke pusat optik (normalized)
-                xn = (col - icx) / (self._calib_ratio if zoom <= 0 else self._calib_ratio * zoom)
-                yn = (row - icy) / (self._calib_ratio if zoom <= 0 else self._calib_ratio * zoom)
+            Dx = math.sin(alpha) * math.cos(phi)
+            Dy = math.sin(alpha) * math.sin(phi)
+            Dz = math.cos(alpha)
 
-                # Identity pass-through: koordinat input = koordinat output
-                # Map sederhana yang memberikan area tengah dari sensor fisheye
-                # (equirectangular crop dengan zoom)
-                map_x[row, col] = icx + xn * self._calib_ratio
-                map_y[row, col] = icy + yn * self._calib_ratio
+            Up_x = -math.cos(alpha) * math.cos(phi)
+            Up_y = -math.cos(alpha) * math.sin(phi)
+            Up_z = math.sin(alpha)
+
+            Rx = Dy * Up_z - Dz * Up_y
+            Ry = Dz * Up_x - Dx * Up_z
+            Rz = Dx * Up_y - Dy * Up_x
+
+            rot_x = Vx * Rx + Vy * Up_x + Vz * Dx
+            rot_y = Vx * Ry + Vy * Up_y + Vz * Dy
+            rot_z = Vx * Rz + Vy * Up_z + Vz * Dz
+
+        else:
+            # Mode 2: pitch=thetaX, yaw=thetaY, roll=thetaZ
+            pitch_r = pitch * DEG_TO_RAD
+            yaw_r   = yaw * DEG_TO_RAD
+            roll_r  = roll * DEG_TO_RAD
+
+            sp = math.sin(pitch_r); cp = math.cos(pitch_r)
+            sy = math.sin(yaw_r);   cy = math.cos(yaw_r)
+            sr = math.sin(roll_r);  cr = math.cos(roll_r)
+
+            R00 = cy * cr + sy * sp * sr
+            R01 = -cy * sr + sy * sp * cr
+            R02 = sy * cp
+            R10 = cp * sr
+            R11 = cp * cr
+            R12 = -sp
+            R20 = -sy * cr + cy * sp * sr
+            R21 = sy * sr + cy * sp * cr
+            R22 = cy * cp
+
+            rot_x = Vx * R00 + Vy * R01 + Vz * R02
+            rot_y = Vx * R10 + Vy * R11 + Vz * R12
+            rot_z = Vx * R20 + Vy * R21 + Vz * R22
+
+        # Compute fisheye angles
+        theta = np.arctan2(np.sqrt(rot_x**2 + rot_y**2), rot_z)
+        phi   = np.arctan2(rot_y, rot_x)
+
+        # Horner's method for fisheye polynomial
+        t = theta
+        rho = (((((self._p0 * t + self._p1) * t + self._p2) * t + self._p3) * t + self._p4) * t + self._p5) * t * self._calib_ratio
+
+        # Map back to image plane
+        map_x[:] = icx + rho * np.cos(phi)
+        map_y[:] = icy - rho * np.sin(phi)
 
     # ── Map rescaling ─────────────────────────────────────────────────────────
 
@@ -460,10 +515,10 @@ class MoildevApplicator:
             mx = self._map_x
             my = self._map_y
 
-        # INTER_LANCZOS4 — kualitas terbaik (diport dari moil_undistorter.py)
+        # INTER_LINEAR — jauh lebih cepat dari INTER_LANCZOS4 (kernel 2x2 vs 8x8)
         remapped = cv2.remap(
             frame_in, mx, my,
-            interpolation=cv2.INTER_LANCZOS4,
+            interpolation=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         )

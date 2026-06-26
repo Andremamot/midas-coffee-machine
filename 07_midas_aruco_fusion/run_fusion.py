@@ -123,7 +123,7 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
         args.focal_length = focal_override
         print(f"[ARUCO] focal length di-override: fx={focal_override:.1f}px")
     print("[INIT] Loading YoloDetector...")
-    yolo_weights = os.path.join(ROOT_DIR, "weights", "best.pt")
+    yolo_weights = os.path.join(ROOT_DIR, "weights", "best_20260625.pt")
     yolo  = YoloDetector(weights_path=yolo_weights)
     print("[INIT] Loading MidasDepthEstimator (this may take a while)...")
     midas_weights = os.path.join(ROOT_DIR, "weights", "midas_v21_small_256.pt")
@@ -422,22 +422,104 @@ def run_pipeline(camera_idx: int, headless: bool, calib_data: dict,
         # JANGAN pakai nama 'calib_data' di sini karena Python akan membuat
         # local variable baru yang menyembunyikan (shadow) outer variable!
         _calib_result = None
-        if calibrate_mode in (1, 2):
-            _calib_result = calib_rt.run_calib_1p_2p(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, calibrate_mode, gui)
-        elif calibrate_mode == 3:
-            _calib_result = calib_rt.run_calib_zgrid(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions, gui)
-        elif calibrate_mode == 4:
-            _calib_result = calib_rt.run_calib_bbox(get_frame, cap, aruco, yolo, midas, headless, true_height, gui)
-        elif calibrate_mode == 5:
-            _calib_result = calib_rt.run_calib_geom(get_frame, cap, aruco, yolo, midas, headless, true_height, n_positions, gui)
-        elif calibrate_mode == 6:
-            _calib_result = calib_rt.run_calib_bilateral(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, n_positions, gui)
-        elif calibrate_mode == 7:
-            _calib_result = calib_rt.run_calib_analytic(get_frame, cap, aruco, yolo, midas, headless, true_height, true_height_2, gui)
-        elif calibrate_mode != 0:
-            print("[ERROR] Unknown calibration mode")
-            if gui and not headless: gui.queue_key(27)
-            return
+        if calibrate_mode != 0:
+            # ── [C++ PARITY] Stop camera stream utama agar tidak conflict dengan cap_calib ──
+            _cam_alive[0] = False
+            if _cam_thread.is_alive():
+                _cam_thread.join(timeout=1.0)
+            
+            if cap and cap.isOpened():
+                cap.release()
+            
+            # Buka cap_calib secara synchronous di thread ini
+            cap_calib = cv2.VideoCapture(camera_idx)
+            cap_calib.set(cv2.CAP_PROP_FRAME_WIDTH, cap_width)
+            cap_calib.set(cv2.CAP_PROP_FRAME_HEIGHT, cap_height)
+            if args.manual_exposure > 0:
+                cap_calib.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+                cap_calib.set(cv2.CAP_PROP_EXPOSURE, gui_desired_exposure[0])
+                cap_calib.set(cv2.CAP_PROP_GAIN, gui_desired_gain[0])
+                cap_calib.set(cv2.CAP_PROP_BRIGHTNESS, gui_desired_bri[0])
+            else:
+                cap_calib.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+            cap_calib.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+            
+            # Update aruco.camera_matrix ke focal moildev sebelum kalibrasi
+            if moil_undistorter is not None:
+                ret_dummy, dummy_frame = cap_calib.read()
+                if ret_dummy and dummy_frame is not None:
+                    dummy_undist = moil_undistorter.undistort(dummy_frame)
+                    aruco.camera_matrix = moil_undistorter.build_aruco_camera_matrix(dummy_undist.shape[1], dummy_undist.shape[0])
+                    print(f"[CALIB] aruco.camera_matrix updated to moildev focal: fx={aruco.camera_matrix[0,0]:.1f} px")
+
+            def get_frame_calib():
+                if (gui_desired_exposure[0] != args.manual_exposure or
+                    gui_desired_gain[0] != getattr(args, '_current_gain', 128) or
+                    gui_desired_bri[0] != getattr(args, '_current_bri', 0)):
+                    cap_calib.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+                    cap_calib.set(cv2.CAP_PROP_EXPOSURE, gui_desired_exposure[0])
+                    cap_calib.set(cv2.CAP_PROP_GAIN, gui_desired_gain[0])
+                    cap_calib.set(cv2.CAP_PROP_BRIGHTNESS, gui_desired_bri[0])
+                    args.manual_exposure = gui_desired_exposure[0]
+                    args._current_gain = gui_desired_gain[0]
+                    args._current_bri = gui_desired_bri[0]
+
+                ret_c, f_c = cap_calib.read()
+                if not ret_c or f_c is None:
+                    return False, None
+                
+                if f_c.shape[1] != cap_width or f_c.shape[0] != cap_height:
+                    f_c = cv2.resize(f_c, (cap_width, cap_height), interpolation=cv2.INTER_LINEAR)
+                    
+                normalize_active = True
+                if gui is not None:
+                    normalize_active = gui.is_normalize_enabled()
+
+                if args.manual_exposure > 0 and normalize_active:
+                    f_c, led_on = normalize_lighting(f_c)
+                    _led_state["detected"] = led_on
+
+                if moil_undistorter is not None and not no_anypoint:
+                    f_c = moil_undistorter.undistort(f_c)
+                    aruco.camera_matrix = moil_undistorter.build_aruco_camera_matrix(f_c.shape[1], f_c.shape[0])
+
+                return True, f_c
+
+            if calibrate_mode in (1, 2):
+                _calib_result = calib_rt.run_calib_1p_2p(get_frame_calib, cap_calib, aruco, yolo, midas, headless, true_height, true_height_2, calibrate_mode, gui)
+            elif calibrate_mode == 3:
+                _calib_result = calib_rt.run_calib_zgrid(get_frame_calib, cap_calib, aruco, yolo, midas, headless, true_height, n_positions, gui)
+            elif calibrate_mode == 4:
+                _calib_result = calib_rt.run_calib_bbox(get_frame_calib, cap_calib, aruco, yolo, midas, headless, true_height, gui)
+            elif calibrate_mode == 5:
+                _calib_result = calib_rt.run_calib_geom(get_frame_calib, cap_calib, aruco, yolo, midas, headless, true_height, n_positions, gui)
+            elif calibrate_mode == 6:
+                _calib_result = calib_rt.run_calib_bilateral(get_frame_calib, cap_calib, aruco, yolo, midas, headless, true_height, true_height_2, n_positions, gui)
+            elif calibrate_mode == 7:
+                _calib_result = calib_rt.run_calib_analytic(get_frame_calib, cap_calib, aruco, yolo, midas, headless, true_height, true_height_2, gui)
+            else:
+                print("[ERROR] Unknown calibration mode")
+                if gui and not headless: gui.queue_key(27)
+                return
+
+            cap_calib.release()
+            
+            # Restart background camera utama untuk pipeline LIVE
+            cap.open(camera_idx)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, cap_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cap_height)
+            if args.manual_exposure > 0:
+                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+                cap.set(cv2.CAP_PROP_EXPOSURE, gui_desired_exposure[0])
+                cap.set(cv2.CAP_PROP_GAIN, gui_desired_gain[0])
+                cap.set(cv2.CAP_PROP_BRIGHTNESS, gui_desired_bri[0])
+            else:
+                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+            cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+            
+            _cam_alive[0] = True
+            _cam_thread_live = _thr.Thread(target=_camera_reader, daemon=True)
+            _cam_thread_live.start()
 
         # Mode Live: gunakan calib_data dari JSON (outer closure)
         # Mode Kalibrasi: gunakan hasil kalibrasi baru
